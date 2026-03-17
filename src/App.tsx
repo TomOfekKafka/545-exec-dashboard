@@ -2249,6 +2249,532 @@ function DashboardPage() {
   );
 }
 
+// ─── Self-Improve Drawer ───────────────────────────────────────────────────────
+
+const IMPROVE_HISTORY_KEY = 'dr-improve-history';
+const IMPROVE_ACTIVE_KEY = 'dr-improve-active';
+
+interface ImproveRun {
+  id: string;
+  timestamp: number;
+  userPrompt: string;
+  refinedPrompt: string;
+  status: 'success' | 'failure' | 'in_progress';
+  duration: number | null;
+}
+
+interface ActiveBuild {
+  runId: number;
+  startTime: number;
+  workflowUrl: string;
+  prompt: string;
+}
+
+type ImproveStep = 'input' | 'review' | 'executing' | 'done';
+
+interface ParsedReview {
+  feasibility: string;
+  feasibilityLevel: 'yes' | 'mostly' | 'no' | 'unknown';
+  suggestions: string;
+  refinedPrompt: string;
+  rawText: string;
+}
+
+function parseAiReview(text: string): ParsedReview {
+  const feasMatch = text.match(/FEASIBILITY:\s*(.*)/i);
+  const sugMatch = text.match(/SUGGESTIONS:\s*([\s\S]*?)(?=REFINED PROMPT:|$)/i);
+  const refMatch = text.match(/REFINED PROMPT:\s*([\s\S]*?)$/i);
+
+  const feasibility = feasMatch ? feasMatch[1].trim() : '';
+  const suggestions = sugMatch ? sugMatch[1].trim() : '';
+  const refinedPrompt = refMatch ? refMatch[1].trim() : '';
+
+  let feasibilityLevel: 'yes' | 'mostly' | 'no' | 'unknown' = 'unknown';
+  const fLower = feasibility.toLowerCase();
+  if (fLower.startsWith('yes')) feasibilityLevel = 'yes';
+  else if (fLower.startsWith('mostly')) feasibilityLevel = 'mostly';
+  else if (fLower.startsWith('no')) feasibilityLevel = 'no';
+
+  return { feasibility, feasibilityLevel, suggestions, refinedPrompt, rawText: text };
+}
+
+function SelfImproveDrawer() {
+  const [isOpen, setIsOpen] = useState(false);
+  const [step, setStep] = useState<ImproveStep>('input');
+  const [userPrompt, setUserPrompt] = useState('');
+  const [reviewing, setReviewing] = useState(false);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [parsedReview, setParsedReview] = useState<ParsedReview | null>(null);
+  const [refinedPrompt, setRefinedPrompt] = useState('');
+  const [buildStatus, setBuildStatus] = useState<'queued' | 'running' | 'completed' | 'failed'>('queued');
+  const [progress, setProgress] = useState(5);
+  const [workflowUrl, setWorkflowUrl] = useState<string | null>(null);
+  const [startTime, setStartTime] = useState<number>(0);
+  const [elapsed, setElapsed] = useState(0);
+  const [showHistory, setShowHistory] = useState(false);
+  const [history, setHistory] = useState<ImproveRun[]>([]);
+  const [isBuilding, setIsBuilding] = useState(false);
+  const [buildError, setBuildError] = useState<string | null>(null);
+  const pollingRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const elapsedRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Load history from localStorage
+  useEffect(() => {
+    try {
+      const raw = localStorage.getItem(IMPROVE_HISTORY_KEY);
+      if (raw) setHistory(JSON.parse(raw));
+    } catch { /* ignore */ }
+  }, []);
+
+  // On page load, resume any active build
+  useEffect(() => {
+    const raw = localStorage.getItem(IMPROVE_ACTIVE_KEY);
+    if (!raw) return;
+    try {
+      const active: ActiveBuild = JSON.parse(raw);
+      setWorkflowUrl(active.workflowUrl);
+      setStartTime(active.startTime);
+      setRefinedPrompt(active.prompt);
+      setStep('executing');
+      setIsOpen(true);
+      setIsBuilding(true);
+      pollStatus(active.runId, active.startTime);
+    } catch { localStorage.removeItem(IMPROVE_ACTIVE_KEY); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Elapsed timer
+  useEffect(() => {
+    if (step === 'executing' && isBuilding) {
+      elapsedRef.current = setInterval(() => {
+        setElapsed(Math.floor((Date.now() - startTime) / 1000));
+      }, 1000);
+    }
+    return () => {
+      if (elapsedRef.current) clearInterval(elapsedRef.current);
+    };
+  }, [step, isBuilding, startTime]);
+
+  function saveHistory(runs: ImproveRun[]) {
+    const trimmed = runs.slice(0, 20);
+    setHistory(trimmed);
+    localStorage.setItem(IMPROVE_HISTORY_KEY, JSON.stringify(trimmed));
+  }
+
+  async function pollStatus(rid: number, st: number) {
+    try {
+      const result = await callMcpTool('check_job_status', {
+        repo_name: '545-exec-dashboard',
+        run_id: rid,
+      });
+      const data = (typeof result === 'string' ? JSON.parse(result) : result) as { status: string; conclusion?: string };
+
+      if (data.status === 'completed') {
+        if (data.conclusion === 'success') {
+          setBuildStatus('completed');
+          setProgress(100);
+          setIsBuilding(false);
+          const duration = Math.floor((Date.now() - st) / 1000);
+          // Save to history
+          const newRun: ImproveRun = {
+            id: String(rid),
+            timestamp: st,
+            userPrompt,
+            refinedPrompt,
+            status: 'success',
+            duration,
+          };
+          const raw = localStorage.getItem(IMPROVE_HISTORY_KEY);
+          const existing: ImproveRun[] = raw ? JSON.parse(raw) : [];
+          saveHistory([newRun, ...existing]);
+          localStorage.removeItem(IMPROVE_ACTIVE_KEY);
+        } else {
+          setBuildStatus('failed');
+          setIsBuilding(false);
+          const duration = Math.floor((Date.now() - st) / 1000);
+          const newRun: ImproveRun = {
+            id: String(rid),
+            timestamp: st,
+            userPrompt,
+            refinedPrompt,
+            status: 'failure',
+            duration,
+          };
+          const raw = localStorage.getItem(IMPROVE_HISTORY_KEY);
+          const existing: ImproveRun[] = raw ? JSON.parse(raw) : [];
+          saveHistory([newRun, ...existing]);
+          localStorage.removeItem(IMPROVE_ACTIVE_KEY);
+        }
+        setStep('done');
+        return;
+      }
+
+      // Time-based progress
+      const elapsedMs = Date.now() - st;
+      const pct = Math.min(70, 5 + (elapsedMs / (10 * 60 * 1000)) * 65);
+      setProgress(pct);
+
+      pollingRef.current = setTimeout(() => pollStatus(rid, st), 30000);
+    } catch {
+      pollingRef.current = setTimeout(() => pollStatus(rid, st), 30000);
+    }
+  }
+
+  async function handleReview() {
+    if (!userPrompt.trim()) return;
+    setReviewing(true);
+    setReviewError(null);
+    try {
+      const result = await callMcpTool('run_ai_agent', {
+        prompt: `You are reviewing a user's request to modify a React dashboard app.
+The app is an executive financial dashboard (Vite + React + TypeScript) with:
+- Dashboard page (/) with P&L charts, KPIs, revenue trends, department breakdown, AI insights
+- Variance Analysis page (/variance) with multi-agent financial analysis
+- Dark theme (bg #0f1117, cards #1a1d29, accents blue #3b82f6, purple #a855f7)
+- Uses recharts for charts, react-router-dom for routing, xlsx for exports
+- Data from Datarails Finance OS API via callMcpTool()
+
+The user requests: "${userPrompt}"
+
+Respond with EXACTLY this format:
+FEASIBILITY: [Yes/Mostly/No] - [1 sentence assessment]
+SUGGESTIONS: [1-2 bullet improvements to make the request clearer, or "None - request is clear"]
+REFINED PROMPT: [A clear, specific, implementation-ready version of the request]`,
+      });
+      const text = typeof result === 'string' ? result : JSON.stringify(result);
+      const parsed = parseAiReview(text);
+      setParsedReview(parsed);
+      setRefinedPrompt(parsed.refinedPrompt || userPrompt);
+      setStep('review');
+    } catch (e) {
+      setReviewError(e instanceof Error ? e.message : 'AI review failed');
+    } finally {
+      setReviewing(false);
+    }
+  }
+
+  async function handleBuild() {
+    const optimizedPrompt = `Update this existing Vite + React + TypeScript SPA.
+
+IMPORTANT: Read the existing src/App.tsx, src/api.ts, and src/App.css first. This is an UPDATE, not a new project.
+
+Current app structure:
+- src/App.tsx: DashboardPage (/), VarianceAnalysisPage (/variance), SelfImproveDrawer, App router
+- src/api.ts: callMcpTool() for MCP API calls
+- src/App.css: Dark theme styling
+- Libraries: recharts, react-router-dom, xlsx, react
+- Theme: bg #0f1117, cards #1a1d29, accents #6366f1 #3b82f6 #a855f7
+
+CHANGE REQUESTED:
+${refinedPrompt}
+
+RULES:
+- Do NOT break existing Dashboard or Variance Analysis pages
+- Do NOT break the SelfImproveDrawer component
+- Maintain the dark theme and visual consistency
+- Must pass npm run build with zero errors`;
+
+    setStep('executing');
+    setBuildStatus('queued');
+    setProgress(5);
+    setBuildError(null);
+    const st = Date.now();
+    setStartTime(st);
+    setIsBuilding(true);
+
+    try {
+      const result = await callMcpTool('create_or_update_app', {
+        repo_name: '545-exec-dashboard',
+        prompt: optimizedPrompt,
+      });
+      const data = (typeof result === 'string' ? JSON.parse(result) : result) as { run_id: number; workflow_run_url: string };
+      setWorkflowUrl(data.workflow_run_url);
+
+      localStorage.setItem(IMPROVE_ACTIVE_KEY, JSON.stringify({
+        runId: data.run_id,
+        startTime: st,
+        workflowUrl: data.workflow_run_url,
+        prompt: refinedPrompt,
+      }));
+
+      pollStatus(data.run_id, st);
+    } catch (e) {
+      setBuildError(e instanceof Error ? e.message : 'Build dispatch failed');
+      setBuildStatus('failed');
+      setIsBuilding(false);
+      setStep('done');
+    }
+  }
+
+  function handleClose() {
+    setIsOpen(false);
+    if (!isBuilding) {
+      setStep('input');
+      setParsedReview(null);
+      setReviewError(null);
+    }
+  }
+
+  function handleReset() {
+    setStep('input');
+    setUserPrompt('');
+    setParsedReview(null);
+    setRefinedPrompt('');
+    setReviewError(null);
+    setBuildStatus('queued');
+    setProgress(5);
+    setBuildError(null);
+  }
+
+  function getPhaseLabel(): string {
+    if (buildStatus === 'completed') return 'Complete!';
+    if (progress < 10) return 'Queued...';
+    if (progress < 60) return 'Claude Code is building...';
+    return 'Deploying...';
+  }
+
+  function formatElapsed(secs: number): string {
+    const m = Math.floor(secs / 60);
+    const s = secs % 60;
+    return m > 0 ? `${m}m ${s}s` : `${s}s`;
+  }
+
+  return (
+    <>
+      {/* FAB */}
+      <button
+        className={`improve-fab${isBuilding ? ' building' : ''}`}
+        onClick={() => setIsOpen(true)}
+        title="Self-Improve"
+        aria-label="Open Self-Improve drawer"
+      >
+        <span style={{ fontSize: 13, fontWeight: 700, letterSpacing: 0.5 }}>AI</span>
+      </button>
+
+      {/* Overlay */}
+      {isOpen && (
+        <div
+          className="improve-overlay"
+          onClick={handleClose}
+        />
+      )}
+
+      {/* Drawer */}
+      <div className={`improve-drawer${isOpen ? ' open' : ''}`}>
+        <div className="improve-drawer-header">
+          <h2>&#10024; Self-Improve</h2>
+          <button
+            onClick={handleClose}
+            style={{ background: 'transparent', border: 'none', color: '#94a3b8', fontSize: 20, cursor: 'pointer', padding: '4px 8px' }}
+            aria-label="Close drawer"
+          >
+            &#x2715;
+          </button>
+        </div>
+
+        <div className="improve-drawer-body">
+          {/* ── Step 1: Input ── */}
+          {step === 'input' && (
+            <div>
+              <p style={{ color: '#94a3b8', fontSize: 13, marginBottom: 16, lineHeight: 1.6 }}>
+                Describe a change you'd like made to this dashboard. AI will review your request and generate an optimized prompt before building.
+              </p>
+              <textarea
+                className="improve-textarea"
+                placeholder="e.g. Add a cash flow waterfall chart to the dashboard..."
+                value={userPrompt}
+                onChange={e => setUserPrompt(e.target.value)}
+              />
+              {reviewError && (
+                <div style={{ color: '#ef4444', fontSize: 12, marginTop: 8, padding: '8px 12px', background: 'rgba(239,68,68,0.1)', borderRadius: 8 }}>
+                  {reviewError}
+                </div>
+              )}
+              <button
+                className="improve-submit-btn"
+                onClick={handleReview}
+                disabled={reviewing || !userPrompt.trim()}
+              >
+                {reviewing ? (
+                  <span style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8 }}>
+                    <span className="ai-loading" style={{ padding: 0 }}>
+                      <span /><span /><span />
+                    </span>
+                    Reviewing...
+                  </span>
+                ) : '✦ Review with AI'}
+              </button>
+
+              {/* History section */}
+              <button
+                className="history-toggle"
+                style={{ marginTop: 24, borderRadius: 8, padding: '8px 16px', fontSize: 13 }}
+                onClick={() => setShowHistory(h => !h)}
+              >
+                {showHistory ? '▲' : '▼'} History ({history.length})
+              </button>
+              {showHistory && (
+                <div style={{ marginTop: 8 }}>
+                  {history.length === 0 ? (
+                    <p style={{ color: '#64748b', fontSize: 13, padding: '8px 0' }}>No previous improvements yet.</p>
+                  ) : (
+                    history.map(run => (
+                      <div key={run.id} className="history-item">
+                        <div className="date">{new Date(run.timestamp).toLocaleString()}</div>
+                        <div className="prompt-preview">{run.userPrompt}</div>
+                        <span className={`status-badge ${run.status === 'success' ? 'success' : run.status === 'failure' ? 'failure' : ''}`}>
+                          {run.status}
+                        </span>
+                      </div>
+                    ))
+                  )}
+                  {history.length > 0 && (
+                    <button
+                      className="clear-history-btn"
+                      onClick={() => {
+                        saveHistory([]);
+                        setShowHistory(false);
+                      }}
+                    >
+                      Clear History
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ── Step 2: Review ── */}
+          {step === 'review' && parsedReview && (
+            <div>
+              <div style={{ marginBottom: 16 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>Feasibility</div>
+                <span className={`feasibility-badge ${parsedReview.feasibilityLevel}`}>
+                  {parsedReview.feasibility || parsedReview.feasibilityLevel}
+                </span>
+              </div>
+
+              {parsedReview.suggestions && (
+                <div>
+                  <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>Suggestions</div>
+                  <div className="suggestions-box">{parsedReview.suggestions}</div>
+                </div>
+              )}
+
+              <div style={{ marginTop: 12 }}>
+                <div style={{ color: '#94a3b8', fontSize: 12, marginBottom: 6, textTransform: 'uppercase', letterSpacing: 0.5 }}>Refined Prompt</div>
+                <textarea
+                  className="refined-textarea"
+                  value={refinedPrompt}
+                  onChange={e => setRefinedPrompt(e.target.value)}
+                />
+              </div>
+
+              <button className="accept-btn" onClick={handleBuild}>
+                &#9654; Accept &amp; Build
+              </button>
+              <p className="time-warning">&#9888; This will take up to 15 minutes</p>
+
+              <button
+                onClick={() => setStep('input')}
+                style={{ width: '100%', marginTop: 12, padding: '10px', background: 'transparent', border: '1px solid #2a2d3e', color: '#94a3b8', borderRadius: 10, cursor: 'pointer', fontSize: 14 }}
+              >
+                &#8592; Back
+              </button>
+            </div>
+          )}
+
+          {/* Fallback if parsing failed */}
+          {step === 'review' && !parsedReview && (
+            <div>
+              <p style={{ color: '#ef4444', fontSize: 13 }}>Could not parse AI response. Proceed with original prompt?</p>
+              <button className="accept-btn" onClick={handleBuild}>&#9654; Build Anyway</button>
+              <button
+                onClick={() => setStep('input')}
+                style={{ width: '100%', marginTop: 12, padding: '10px', background: 'transparent', border: '1px solid #2a2d3e', color: '#94a3b8', borderRadius: 10, cursor: 'pointer', fontSize: 14 }}
+              >
+                &#8592; Back
+              </button>
+            </div>
+          )}
+
+          {/* ── Step 3: Executing ── */}
+          {step === 'executing' && (
+            <div>
+              <div className="improve-phase">{getPhaseLabel()}</div>
+              <div className="improve-progress-track">
+                <div className="improve-progress-fill" style={{ width: `${progress}%` }} />
+              </div>
+              <div className="improve-elapsed">Elapsed: {formatElapsed(elapsed)}</div>
+
+              <div style={{ marginTop: 16, color: '#94a3b8', fontSize: 13, lineHeight: 1.6 }}>
+                <p>Claude Code is reading your codebase and making the requested changes, then deploying to Azure Static Web Apps.</p>
+              </div>
+
+              {workflowUrl && (
+                <a href={workflowUrl} target="_blank" rel="noopener noreferrer" className="improve-watch-link">
+                  &#128279; Watch build live on GitHub Actions
+                </a>
+              )}
+
+              <div style={{ marginTop: 20, padding: '12px 16px', background: '#1a1d29', borderRadius: 10, fontSize: 12, color: '#64748b' }}>
+                <strong style={{ color: '#94a3b8' }}>Request:</strong>{' '}
+                {refinedPrompt.slice(0, 120)}{refinedPrompt.length > 120 ? '...' : ''}
+              </div>
+            </div>
+          )}
+
+          {/* ── Step 4: Done ── */}
+          {step === 'done' && (
+            <div>
+              {buildStatus === 'completed' ? (
+                <div className="improve-success">
+                  <div className="checkmark">&#9989;</div>
+                  <h3>Changes Deployed!</h3>
+                  <p>Your improvement has been applied and deployed successfully.</p>
+                  {workflowUrl && (
+                    <a href={workflowUrl} target="_blank" rel="noopener noreferrer" className="improve-watch-link">
+                      View GitHub Actions run
+                    </a>
+                  )}
+                  <button className="improve-refresh-btn" onClick={() => window.location.reload()}>
+                    &#8635; Refresh to See Updates
+                  </button>
+                  <button
+                    onClick={handleReset}
+                    style={{ display: 'block', width: '100%', marginTop: 12, padding: '10px', background: 'transparent', border: '1px solid #2a2d3e', color: '#94a3b8', borderRadius: 10, cursor: 'pointer', fontSize: 14 }}
+                  >
+                    Make Another Improvement
+                  </button>
+                </div>
+              ) : (
+                <div className="improve-failure" style={{ textAlign: 'center', padding: '40px 0' }}>
+                  <div style={{ fontSize: 48, marginBottom: 16 }}>&#10060;</div>
+                  <h3>Build Failed</h3>
+                  <p style={{ color: '#94a3b8', marginTop: 8 }}>
+                    {buildError || 'The build did not complete successfully.'}
+                  </p>
+                  {workflowUrl && (
+                    <a href={workflowUrl} target="_blank" rel="noopener noreferrer" className="improve-watch-link">
+                      View GitHub Actions logs
+                    </a>
+                  )}
+                  <button
+                    onClick={handleReset}
+                    style={{ display: 'block', width: '100%', marginTop: 20, padding: '12px', background: '#1a1d29', border: '1px solid #2a2d3e', color: '#94a3b8', borderRadius: 10, cursor: 'pointer', fontSize: 14 }}
+                  >
+                    Try Again
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
 // ─── App with Router ──────────────────────────────────────────────────────────
 
 export default function App() {
@@ -2276,6 +2802,7 @@ export default function App() {
         <Route path="/" element={<DashboardPage />} />
         <Route path="/variance" element={<VarianceAnalysisPage />} />
       </Routes>
+      <SelfImproveDrawer />
     </BrowserRouter>
   );
 }

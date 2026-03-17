@@ -1206,3 +1206,332 @@ body {
   color: #ef4444;
   font-weight: 600;
 }
+
+/* ─── Self-Improve FAB ───────────────────────────────────────────────────────*/
+.improve-fab {
+  position: fixed;
+  bottom: 24px;
+  right: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 16px;
+  background: linear-gradient(135deg, #6366f1, #a855f7);
+  border: none;
+  color: white;
+  font-size: 22px;
+  cursor: pointer;
+  z-index: 1000;
+  box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4);
+  transition: transform 0.2s, box-shadow 0.2s;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.improve-fab:hover {
+  transform: scale(1.08);
+  box-shadow: 0 6px 28px rgba(99, 102, 241, 0.5);
+}
+
+.improve-fab.building {
+  animation: fabPulse 2s infinite;
+}
+
+@keyframes fabPulse {
+  0%, 100% { box-shadow: 0 4px 20px rgba(99, 102, 241, 0.4); }
+  50% { box-shadow: 0 4px 30px rgba(168, 85, 247, 0.7); }
+}
+
+/* ─── Self-Improve Overlay & Drawer ─────────────────────────────────────────*/
+.improve-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  z-index: 1001;
+}
+
+.improve-drawer {
+  position: fixed;
+  top: 0;
+  right: -440px;
+  width: 440px;
+  height: 100vh;
+  background: #12151f;
+  border-left: 1px solid #1e2130;
+  z-index: 1002;
+  transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+}
+
+.improve-drawer.open {
+  right: 0;
+}
+
+.improve-drawer-header {
+  padding: 20px 24px;
+  border-bottom: 1px solid #1e2130;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.improve-drawer-header h2 {
+  font-size: 18px;
+  color: white;
+  margin: 0;
+}
+
+.improve-drawer-body {
+  padding: 24px;
+  flex: 1;
+}
+
+/* ─── Textarea ───────────────────────────────────────────────────────────────*/
+.improve-textarea {
+  width: 100%;
+  min-height: 120px;
+  background: #1a1d29;
+  color: #e2e8f0;
+  border: 1px solid #2a2d3e;
+  border-radius: 12px;
+  padding: 14px;
+  font-size: 14px;
+  font-family: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.improve-textarea:focus {
+  border-color: #6366f1;
+  outline: none;
+}
+
+.improve-submit-btn {
+  width: 100%;
+  padding: 14px;
+  margin-top: 16px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  color: white;
+  border: none;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: transform 0.15s;
+}
+
+.improve-submit-btn:hover:not(:disabled) {
+  transform: scale(1.01);
+}
+
+.improve-submit-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ─── Review Step ────────────────────────────────────────────────────────────*/
+.feasibility-badge {
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.feasibility-badge.yes { background: #064e3b; color: #34d399; }
+.feasibility-badge.mostly { background: #713f12; color: #fbbf24; }
+.feasibility-badge.no { background: #7f1d1d; color: #f87171; }
+.feasibility-badge.unknown { background: #1e2130; color: #94a3b8; }
+
+.suggestions-box {
+  background: #1a1d29;
+  border-radius: 10px;
+  padding: 14px;
+  margin: 12px 0;
+  color: #94a3b8;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.refined-textarea {
+  width: 100%;
+  min-height: 100px;
+  background: #1a1d29;
+  color: #e2e8f0;
+  border: 1px solid #2a2d3e;
+  border-radius: 10px;
+  padding: 12px;
+  font-size: 13px;
+  font-family: inherit;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.refined-textarea:focus {
+  border-color: #6366f1;
+  outline: none;
+}
+
+.accept-btn {
+  width: 100%;
+  padding: 14px;
+  margin-top: 12px;
+  border-radius: 12px;
+  background: linear-gradient(135deg, #22c55e, #16a34a);
+  color: white;
+  border: none;
+  font-size: 15px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: transform 0.15s;
+}
+
+.accept-btn:hover {
+  transform: scale(1.01);
+}
+
+.time-warning {
+  text-align: center;
+  color: #94a3b8;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
+/* ─── Progress Bar ───────────────────────────────────────────────────────────*/
+.improve-progress-track {
+  height: 8px;
+  background: #1a1d29;
+  border-radius: 4px;
+  overflow: hidden;
+  margin: 20px 0;
+}
+
+.improve-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #3b82f6, #a855f7);
+  border-radius: 4px;
+  transition: width 2s ease;
+}
+
+.improve-phase {
+  font-size: 14px;
+  color: #a855f7;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+
+.improve-elapsed {
+  font-size: 12px;
+  color: #64748b;
+}
+
+.improve-watch-link {
+  color: #6366f1;
+  font-size: 13px;
+  text-decoration: underline;
+  margin-top: 12px;
+  display: block;
+}
+
+/* ─── Done Step ──────────────────────────────────────────────────────────────*/
+.improve-success {
+  text-align: center;
+  padding: 40px 0;
+}
+
+.improve-success .checkmark {
+  font-size: 48px;
+  margin-bottom: 16px;
+}
+
+.improve-success h3 {
+  color: #22c55e;
+  font-size: 20px;
+}
+
+.improve-success p {
+  color: #94a3b8;
+  margin-top: 8px;
+}
+
+.improve-refresh-btn {
+  margin-top: 20px;
+  padding: 12px 32px;
+  border-radius: 10px;
+  background: #3b82f6;
+  color: white;
+  border: none;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  font-family: inherit;
+  transition: transform 0.15s;
+}
+
+.improve-refresh-btn:hover {
+  transform: scale(1.03);
+}
+
+.improve-failure h3 {
+  color: #ef4444;
+  font-size: 20px;
+}
+
+/* ─── History Items (Self-Improve) ──────────────────────────────────────────*/
+.improve-drawer .history-item {
+  background: #0d0d1f;
+  border: 1px solid #1e2130;
+  border-radius: 10px;
+  padding: 14px;
+  margin-top: 8px;
+  transition: border-color 0.2s;
+}
+
+.improve-drawer .history-item:hover {
+  border-color: #6366f1;
+}
+
+.improve-drawer .history-item .date {
+  font-size: 12px;
+  color: #64748b;
+  font-weight: normal;
+}
+
+.improve-drawer .history-item .prompt-preview {
+  font-size: 13px;
+  color: #e2e8f0;
+  margin-top: 4px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.improve-drawer .history-item .status-badge {
+  display: inline-block;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 10px;
+  margin-top: 6px;
+  font-weight: 600;
+}
+
+.improve-drawer .history-item .status-badge.success { background: #064e3b; color: #34d399; }
+.improve-drawer .history-item .status-badge.failure { background: #7f1d1d; color: #f87171; }
+.improve-drawer .history-item .status-badge.in_progress { background: #1e3a5f; color: #60a5fa; }
+
+/* ─── Responsive ─────────────────────────────────────────────────────────────*/
+@media (max-width: 500px) {
+  .improve-drawer {
+    width: 100%;
+    right: -100%;
+  }
+  .improve-drawer.open {
+    right: 0;
+  }
+}
