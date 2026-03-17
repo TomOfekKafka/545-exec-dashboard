@@ -466,6 +466,108 @@ body {
   margin-bottom: 8px;
 }
 
+/* ─── Card Title Row Actions ────────────────────────────────────────────────── */
+.card-title-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+/* ─── AI Insights Button ────────────────────────────────────────────────────── */
+.ai-insights-btn {
+  background: linear-gradient(135deg, #6366f1, #a855f7);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  padding: 6px 14px;
+  font-size: 13px;
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: all 0.2s;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.ai-insights-btn:hover {
+  transform: scale(1.05);
+  box-shadow: 0 0 20px rgba(139, 92, 246, 0.3);
+}
+
+.ai-insights-btn.loading {
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* ─── AI Panel ──────────────────────────────────────────────────────────────── */
+.ai-panel {
+  background: linear-gradient(135deg, #1e1b4b, #1a1d29);
+  border: 1px solid #4338ca;
+  border-radius: 12px;
+  padding: 16px 20px;
+  margin-top: 12px;
+  font-size: 14px;
+  line-height: 1.7;
+  color: #e2e8f0;
+  animation: aiPanelFadeIn 0.3s ease-in;
+}
+
+@keyframes aiPanelFadeIn {
+  from { opacity: 0; transform: translateY(-8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ai-panel ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.ai-panel li {
+  padding: 4px 0;
+}
+
+.ai-panel li::before {
+  content: "→ ";
+  color: #a855f7;
+  font-weight: bold;
+}
+
+.ai-powered-label {
+  margin-top: 12px;
+  font-size: 11px;
+  color: #6b6f84;
+  text-align: right;
+  letter-spacing: 0.3px;
+}
+
+/* ─── AI Loading Dots ───────────────────────────────────────────────────────── */
+.ai-loading {
+  display: flex;
+  gap: 6px;
+  padding: 12px 0;
+  align-items: center;
+}
+
+.ai-loading span {
+  width: 8px;
+  height: 8px;
+  background: #a855f7;
+  border-radius: 50%;
+  animation: aiDotPulse 1.2s infinite;
+}
+
+.ai-loading span:nth-child(2) { animation-delay: 0.2s; }
+.ai-loading span:nth-child(3) { animation-delay: 0.4s; }
+
+@keyframes aiDotPulse {
+  0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
+  40% { opacity: 1; transform: scale(1.2); }
+}
+
 /* ─── Footer ───────────────────────────────────────────────────────────────── */
 .app-footer {
   background: #12151f;

@@ -497,6 +497,60 @@ const Skeleton = ({ height = 200 }: { height?: number }) => (
   <div className="skeleton" style={{ height }} />
 );
 
+// ─── AI Insights ──────────────────────────────────────────────────────────────
+
+function parseAiLines(text: string): string[] {
+  return text
+    .split('\n')
+    .map(l => l.trim())
+    .filter(Boolean)
+    .map(l => l.replace(/^[\*\-•·]\s*/, '').replace(/^\d+\.\s*/, '').trim())
+    .filter(Boolean);
+}
+
+interface AiPanelProps {
+  text: string | null;
+  loading: boolean;
+}
+
+const AiInsightsPanel = ({ text, loading }: AiPanelProps) => {
+  if (!loading && !text) return null;
+  return (
+    <div className="ai-panel">
+      {loading ? (
+        <div className="ai-loading">
+          <span /><span /><span />
+        </div>
+      ) : (
+        <>
+          <ul>
+            {parseAiLines(text!).map((line, i) => (
+              <li key={i}>{line}</li>
+            ))}
+          </ul>
+          <div className="ai-powered-label">✨ Powered by AI</div>
+        </>
+      )}
+    </div>
+  );
+};
+
+interface AiButtonProps {
+  loading: boolean;
+  onClick: () => void;
+}
+
+const AiInsightsButton = ({ loading, onClick }: AiButtonProps) => (
+  <button
+    className={`ai-insights-btn${loading ? ' loading' : ''}`}
+    onClick={onClick}
+    disabled={loading}
+  >
+    <span>✨</span>
+    <span>{loading ? 'Analyzing…' : 'AI Insights'}</span>
+  </button>
+);
+
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -511,6 +565,35 @@ export default function App() {
   const [compareMode, setCompareMode] = useState(false);
   const [periodA, setPeriodA] = useState('');
   const [periodB, setPeriodB] = useState('');
+
+  // AI Insights state: keyed by section id
+  const [aiInsights, setAiInsights] = useState<Record<string, string>>({});
+  const [aiLoading, setAiLoading] = useState<Record<string, boolean>>({});
+
+  // Clear AI cache when viewMode changes
+  useEffect(() => {
+    setAiInsights({});
+  }, [viewMode]);
+
+  async function fetchAiInsight(key: string, prompt: string) {
+    if (aiInsights[key]) return; // already cached
+    setAiLoading(prev => ({ ...prev, [key]: true }));
+    try {
+      const result = await callMcpTool('run_ai_agent', { prompt });
+      let text = '';
+      if (typeof result === 'string') {
+        text = result;
+      } else if (result && typeof result === 'object') {
+        const r = result as Record<string, unknown>;
+        text = (r.result as string) ?? (r.content as string) ?? (r.text as string) ?? JSON.stringify(result);
+      }
+      setAiInsights(prev => ({ ...prev, [key]: text || 'No insights available.' }));
+    } catch {
+      setAiInsights(prev => ({ ...prev, [key]: 'Unable to generate insights at this time.' }));
+    } finally {
+      setAiLoading(prev => ({ ...prev, [key]: false }));
+    }
+  }
 
   useEffect(() => {
     async function fetchAll() {
@@ -749,15 +832,28 @@ export default function App() {
                   <h2 className="card-title">
                     Period Comparison — {viewLabel} · Actuals
                   </h2>
-                  <div className="comparison-legend">
-                    <span className="legend-item">
-                      <span className="legend-line legend-line-a" />
-                      {periodA}
-                    </span>
-                    <span className="legend-item">
-                      <span className="legend-line legend-line-b legend-line-dashed" />
-                      {periodB}
-                    </span>
+                  <div className="card-title-actions">
+                    <div className="comparison-legend">
+                      <span className="legend-item">
+                        <span className="legend-line legend-line-a" />
+                        {periodA}
+                      </span>
+                      <span className="legend-item">
+                        <span className="legend-line legend-line-b legend-line-dashed" />
+                        {periodB}
+                      </span>
+                    </div>
+                    {!loading && (
+                      <AiInsightsButton
+                        loading={!!aiLoading['pnl']}
+                        onClick={() =>
+                          fetchAiInsight(
+                            'pnl',
+                            `You are an FP&A analyst. Analyze this P&L data showing Actuals vs Budget over time (${viewLabel} view). Identify: 1) Overall trend direction, 2) Months with biggest variance from budget, 3) Any concerning patterns, 4) Key takeaway for the CFO. Be concise, use bullet points. Data: ${JSON.stringify(aggPnL)}`
+                          )
+                        }
+                      />
+                    )}
                   </div>
                 </div>
                 {loading ? (
@@ -859,10 +955,24 @@ export default function App() {
                     </ResponsiveContainer>
                   </div>
                 )}
+                <AiInsightsPanel text={aiInsights['pnl'] ?? null} loading={!!aiLoading['pnl']} />
               </>
             ) : (
               <>
-                <h2 className="card-title">P&amp;L Trend — Actuals vs Budget ({viewLabel})</h2>
+                <div className="card-title-row">
+                  <h2 className="card-title">P&amp;L Trend — Actuals vs Budget ({viewLabel})</h2>
+                  {!loading && (
+                    <AiInsightsButton
+                      loading={!!aiLoading['pnl']}
+                      onClick={() =>
+                        fetchAiInsight(
+                          'pnl',
+                          `You are an FP&A analyst. Analyze this P&L data showing Actuals vs Budget over time (${viewLabel} view). Identify: 1) Overall trend direction, 2) Months with biggest variance from budget, 3) Any concerning patterns, 4) Key takeaway for the CFO. Be concise, use bullet points. Data: ${JSON.stringify(aggPnL)}`
+                        )
+                      }
+                    />
+                  )}
+                </div>
                 {loading ? (
                   <Skeleton height={280} />
                 ) : (
@@ -878,13 +988,27 @@ export default function App() {
                     </LineChart>
                   </ResponsiveContainer>
                 )}
+                <AiInsightsPanel text={aiInsights['pnl'] ?? null} loading={!!aiLoading['pnl']} />
               </>
             )}
           </section>
 
           {/* Section 3: Budget Variance */}
           <section className="card">
-            <h2 className="card-title">Budget Variance — Actuals − Budget ({viewLabel})</h2>
+            <div className="card-title-row">
+              <h2 className="card-title">Budget Variance — Actuals − Budget ({viewLabel})</h2>
+              {!loading && (
+                <AiInsightsButton
+                  loading={!!aiLoading['variance']}
+                  onClick={() =>
+                    fetchAiInsight(
+                      'variance',
+                      `You are an FP&A analyst. Analyze these budget variances (Actuals minus Budget) in ${viewLabel} view. Identify: 1) Whether the company is generally over or under budget, 2) The worst variance months and likely causes, 3) Trend in variance (improving or worsening), 4) Recommended actions. Be concise, use bullet points. Data: ${JSON.stringify(varianceData)}`
+                    )
+                  }
+                />
+              )}
+            </div>
             {loading ? (
               <Skeleton height={280} />
             ) : (
@@ -909,13 +1033,27 @@ export default function App() {
                 </BarChart>
               </ResponsiveContainer>
             )}
+            <AiInsightsPanel text={aiInsights['variance'] ?? null} loading={!!aiLoading['variance']} />
           </section>
         </div>
 
         <div className="charts-grid-2">
           {/* Section 4: KPI Breakdown */}
           <section className="card">
-            <h2 className="card-title">KPI Breakdown — Actuals ({viewLabel})</h2>
+            <div className="card-title-row">
+              <h2 className="card-title">KPI Breakdown — Actuals ({viewLabel})</h2>
+              {!loading && (
+                <AiInsightsButton
+                  loading={!!aiLoading['kpi']}
+                  onClick={() =>
+                    fetchAiInsight(
+                      'kpi',
+                      `You are an FP&A analyst. Analyze this KPI breakdown showing Compensation, D&A, Interest Expense, and Interest Income over time (${viewLabel} view). Identify: 1) Which cost category is growing fastest, 2) Any unusual spikes, 3) Compensation as % of total and if it's healthy, 4) Key insight. Be concise, use bullet points. Data: ${JSON.stringify(aggKpi)}`
+                    )
+                  }
+                />
+              )}
+            </div>
             {loading ? (
               <Skeleton height={280} />
             ) : (
@@ -946,11 +1084,25 @@ export default function App() {
                 </AreaChart>
               </ResponsiveContainer>
             )}
+            <AiInsightsPanel text={aiInsights['kpi'] ?? null} loading={!!aiLoading['kpi']} />
           </section>
 
           {/* Section 5: Headcount */}
           <section className="card">
-            <h2 className="card-title">Headcount Overview — Actuals ({viewLabel})</h2>
+            <div className="card-title-row">
+              <h2 className="card-title">Headcount Overview — Actuals ({viewLabel})</h2>
+              {!loading && (
+                <AiInsightsButton
+                  loading={!!aiLoading['headcount']}
+                  onClick={() =>
+                    fetchAiInsight(
+                      'headcount',
+                      `You are an HR/Finance analyst. Analyze headcount trends by department (${viewLabel} view). Identify: 1) Overall headcount trajectory, 2) Fastest growing departments, 3) Revenue per employee trend if possible, 4) Key workforce planning insight. Be concise, use bullet points. Data: ${JSON.stringify(aggHeadcount)}`
+                    )
+                  }
+                />
+              )}
+            </div>
             {loading ? (
               <Skeleton height={280} />
             ) : (
@@ -975,12 +1127,26 @@ export default function App() {
                 </LineChart>
               </ResponsiveContainer>
             )}
+            <AiInsightsPanel text={aiInsights['headcount'] ?? null} loading={!!aiLoading['headcount']} />
           </section>
         </div>
 
         {/* Section 6: Department Spending */}
         <section className="card">
-          <h2 className="card-title">Department Spending — Latest Month</h2>
+          <div className="card-title-row">
+            <h2 className="card-title">Department Spending — Latest Month</h2>
+            {!loading && (
+              <AiInsightsButton
+                loading={!!aiLoading['dept']}
+                onClick={() =>
+                  fetchAiInsight(
+                    'dept',
+                    `You are an FP&A analyst. Analyze department spending data. Identify: 1) Top spending departments and if their spend is justified, 2) Any departments with unusual growth, 3) Department cost distribution health, 4) Recommendations. Be concise, use bullet points. Data: ${JSON.stringify(deptData)}`
+                  )
+                }
+              />
+            )}
+          </div>
           {loading ? (
             <Skeleton height={320} />
           ) : (
@@ -1002,6 +1168,7 @@ export default function App() {
               </BarChart>
             </ResponsiveContainer>
           )}
+          <AiInsightsPanel text={aiInsights['dept'] ?? null} loading={!!aiLoading['dept']} />
         </section>
       </main>
 
