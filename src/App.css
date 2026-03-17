@@ -239,6 +239,233 @@ body {
   animation: shimmer 1.5s infinite;
 }
 
+/* ─── Toolbar ──────────────────────────────────────────────────────────────── */
+.toolbar {
+  background: #12151f;
+  border-bottom: 1px solid #1e2130;
+  padding: 10px 24px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  position: sticky;
+  top: 60px;
+  z-index: 99;
+}
+
+.toolbar-left {
+  display: flex;
+  align-items: center;
+}
+
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+/* ─── View Selector Pills ──────────────────────────────────────────────────── */
+.view-selector {
+  display: flex;
+  gap: 4px;
+  background: #1a1d29;
+  border-radius: 12px;
+  padding: 4px;
+}
+
+.view-btn {
+  padding: 7px 20px;
+  border-radius: 9px;
+  border: none;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  transition: background 0.15s, color 0.15s;
+}
+
+.view-btn.active {
+  background: #3b82f6;
+  color: #fff;
+}
+
+.view-btn:not(.active) {
+  background: transparent;
+  color: #94a3b8;
+}
+
+.view-btn:not(.active):hover {
+  background: #252836;
+  color: #c8cad8;
+}
+
+/* ─── Compare Toggle ───────────────────────────────────────────────────────── */
+.compare-toggle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.compare-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: #94a3b8;
+}
+
+.toggle-switch {
+  width: 40px;
+  height: 22px;
+  border-radius: 11px;
+  background: #2a2d3e;
+  position: relative;
+  cursor: pointer;
+  transition: background 0.2s;
+  border: 1px solid #334155;
+}
+
+.toggle-switch.on {
+  background: #3b82f6;
+  border-color: #3b82f6;
+}
+
+.toggle-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  transition: transform 0.2s;
+}
+
+.toggle-switch.on .toggle-thumb {
+  transform: translateX(18px);
+}
+
+/* ─── Compare Period Pickers ───────────────────────────────────────────────── */
+.compare-periods-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  animation: fadeIn 0.2s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.period-picker {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.period-picker-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: #6b6f84;
+}
+
+.period-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.period-dot-a { background: #3b82f6; }
+.period-dot-b { background: #a855f7; }
+
+.period-select {
+  background: #1a1d29;
+  color: #e2e4f0;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.period-select:focus {
+  border-color: #3b82f6;
+}
+
+.vs-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: #6b6f84;
+}
+
+/* ─── Comparison Legend ────────────────────────────────────────────────────── */
+.card-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.card-title-row .card-title {
+  margin-bottom: 0;
+}
+
+.comparison-legend {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-shrink: 0;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #94a3b8;
+  font-weight: 500;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 24px;
+  height: 2px;
+  border-radius: 1px;
+  flex-shrink: 0;
+}
+
+.legend-line-a { background: #3b82f6; }
+.legend-line-b { background: #a855f7; }
+
+.legend-line-dashed {
+  background: none;
+  border-top: 2px dashed #a855f7;
+}
+
+/* ─── Variance Section ─────────────────────────────────────────────────────── */
+.variance-section {
+  margin-top: 16px;
+  border-top: 1px solid #1e2130;
+  padding-top: 12px;
+}
+
+.variance-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b6f84;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+
 /* ─── Footer ───────────────────────────────────────────────────────────────── */
 .app-footer {
   background: #12151f;
