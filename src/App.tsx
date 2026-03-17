@@ -9,6 +9,11 @@ import * as XLSX from 'xlsx';
 import { callMcpTool } from './api';
 import './App.css';
 
+// ─── localStorage Keys ─────────────────────────────────────────────────────────
+const DASHBOARD_CACHE_KEY = 'dr-dashboard-cache';
+const AI_CACHE_KEY = 'dr-ai-insights-cache';
+const VARIANCE_HISTORY_KEY = 'dr-variance-history';
+
 // ─── Shared Types ─────────────────────────────────────────────────────────────
 
 type ViewMode = 'monthly' | 'quarterly' | 'yearly';
@@ -95,6 +100,21 @@ interface KpiSummary {
   aGP: number; bGP: number;
   aNI: number; bNI: number;
   aGM: number; bGM: number;
+}
+
+// Stored without `months` to keep localStorage lean
+type StoredVarianceLine = Omit<VarianceLine, 'months'>;
+
+interface VarianceRun {
+  id: string;
+  timestamp: number;
+  duration: number;
+  taskCount: number;
+  kpis: KpiSummary;
+  reviewerNarrative: string;
+  executiveNarrative: string;
+  variances: StoredVarianceLine[];
+  checks: Array<{ label: string; pass: boolean; detail: string }>;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -867,6 +887,46 @@ function VarianceAnalysisPage() {
   const [error, setError] = useState('');
   const activityCounter = useRef(0);
 
+  // History state
+  const [runHistory, setRunHistory] = useState<VarianceRun[]>([]);
+  const [showHistory, setShowHistory] = useState(false);
+  const [viewingHistoryRun, setViewingHistoryRun] = useState<VarianceRun | null>(null);
+  const [compareRun, setCompareRun] = useState<VarianceRun | null>(null);
+  const runStartTime = useRef<number>(0);
+
+  // Load history from localStorage on mount, restore last run
+  useEffect(() => {
+    try {
+      const histStr = localStorage.getItem(VARIANCE_HISTORY_KEY);
+      if (histStr) {
+        const hist = JSON.parse(histStr) as VarianceRun[];
+        setRunHistory(hist);
+        if (hist.length > 0) {
+          loadHistoryRun(hist[0]);
+        }
+      }
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  function loadHistoryRun(run: VarianceRun) {
+    setViewingHistoryRun(run);
+    setKpis(run.kpis);
+    setVariances(run.variances.map(v => ({ ...v, months: {} })));
+    setChecks(run.checks);
+    setReviewerText(run.reviewerNarrative);
+    setNarrativeText(run.executiveNarrative);
+    setActivities([]);
+    setPhase('complete');
+  }
+
+  function clearHistory() {
+    try { localStorage.removeItem(VARIANCE_HISTORY_KEY); } catch {}
+    setRunHistory([]);
+    setViewingHistoryRun(null);
+    setCompareRun(null);
+  }
+
   const addActivity = (item: Omit<ActivityItem, 'id'>) => {
     activityCounter.current += 1;
     const id = activityCounter.current;
@@ -878,6 +938,7 @@ function VarianceAnalysisPage() {
   };
 
   async function runAnalysis() {
+    runStartTime.current = Date.now();
     setPhase('running');
     setActivities([]);
     setChecks([]);
@@ -886,6 +947,8 @@ function VarianceAnalysisPage() {
     setReviewerText('');
     setNarrativeText('');
     setError('');
+    setViewingHistoryRun(null);
+    setCompareRun(null);
     activityCounter.current = 0;
     setAgentStates({ o: 'idle', e: 'idle', r: 'idle', t: 'idle', m: 'idle', cw: 'idle' });
 
@@ -1123,6 +1186,28 @@ function VarianceAnalysisPage() {
       setAgent('cw', 'complete');
 
       setPhase('complete');
+
+      // ── Save run to localStorage history ────────────────────────────────────
+      const run: VarianceRun = {
+        id: Date.now().toString(),
+        timestamp: runStartTime.current,
+        duration: Date.now() - runStartTime.current,
+        taskCount: activityCounter.current,
+        kpis: kpiSnapshot,
+        reviewerNarrative: rText,
+        executiveNarrative: nText,
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        variances: varLines.map(({ months: _m, ...rest }) => rest),
+        checks: checkItems,
+      };
+      try {
+        const histStr = localStorage.getItem(VARIANCE_HISTORY_KEY);
+        const hist: VarianceRun[] = histStr ? JSON.parse(histStr) : [];
+        hist.unshift(run);
+        if (hist.length > 20) hist.pop();
+        localStorage.setItem(VARIANCE_HISTORY_KEY, JSON.stringify(hist));
+        setRunHistory(hist);
+      } catch {}
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Analysis failed';
       setError(msg);
@@ -1146,9 +1231,22 @@ function VarianceAnalysisPage() {
       <div className="variance-header-bar">
         <div>
           <h1 className="variance-title">Agentic Variance Analysis</h1>
-          <p className="variance-subtitle">Multi-agent P&amp;L review powered by Datarails AI</p>
+          <p className="variance-subtitle">
+            {viewingHistoryRun
+              ? `Viewing run from ${new Date(viewingHistoryRun.timestamp).toLocaleString()}`
+              : 'Multi-agent P&L review powered by Datarails AI'}
+          </p>
         </div>
         <div className="variance-header-right">
+          {viewingHistoryRun && (
+            <button
+              className="run-btn"
+              style={{ background: 'transparent', border: '1px solid #334155', color: '#94a3b8', fontSize: 13, padding: '8px 16px' }}
+              onClick={() => { setViewingHistoryRun(null); setPhase('idle'); setKpis(null); setVariances([]); setChecks([]); setReviewerText(''); setNarrativeText(''); setCompareRun(null); }}
+            >
+              ✕ Clear
+            </button>
+          )}
           <div className="variance-status">
             <span className={`status-dot status-${phase}`} />
             <span className="status-label">{statusLabel}</span>
@@ -1320,7 +1418,7 @@ function VarianceAnalysisPage() {
       )}
 
       {/* ── Download Buttons ────────────────────────────────────────────── */}
-      {phase === 'complete' && variances.length > 0 && (
+      {phase === 'complete' && variances.length > 0 && !viewingHistoryRun && (
         <div className="variance-downloads">
           <button
             className="download-btn"
@@ -1337,9 +1435,111 @@ function VarianceAnalysisPage() {
         </div>
       )}
 
+      {/* ── Compare Panel ───────────────────────────────────────────────── */}
+      {compareRun && kpis && (
+        <div className="variance-card">
+          <div className="variance-card-title">
+            Comparison — Current vs {new Date(compareRun.timestamp).toLocaleString()}
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="compare-table">
+              <thead>
+                <tr>
+                  <th>Metric</th>
+                  <th>Current Run</th>
+                  <th>Previous Run</th>
+                  <th>Delta</th>
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  { label: 'Revenue', curr: kpis.aR, prev: compareRun.kpis.aR, isPercent: false },
+                  { label: 'Gross Profit', curr: kpis.aGP, prev: compareRun.kpis.aGP, isPercent: false },
+                  { label: 'Net Income', curr: kpis.aNI, prev: compareRun.kpis.aNI, isPercent: false },
+                  { label: 'Gross Margin', curr: kpis.aGM, prev: compareRun.kpis.aGM, isPercent: true },
+                ].map(row => {
+                  const delta = row.curr - row.prev;
+                  const deltaPct = row.prev !== 0 ? (delta / Math.abs(row.prev)) * 100 : 0;
+                  const positive = delta >= 0;
+                  const fmtVal = (v: number) => row.isPercent ? `${(v * 100).toFixed(1)}%` : formatLargeCurrency(v);
+                  const fmtDelta = row.isPercent
+                    ? `${positive ? '+' : ''}${(delta * 100).toFixed(1)}pts`
+                    : `${positive ? '+' : ''}${formatLargeCurrency(delta)}`;
+                  return (
+                    <tr key={row.label}>
+                      <td>{row.label}</td>
+                      <td>{fmtVal(row.curr)}</td>
+                      <td>{fmtVal(row.prev)}</td>
+                      <td className={`delta ${positive ? 'positive' : 'negative'}`}>
+                        {fmtDelta} ({positive ? '+' : ''}{deltaPct.toFixed(1)}%)
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Previous Runs History ────────────────────────────────────────── */}
+      {runHistory.length > 0 && (
+        <div className="history-panel">
+          <button className="history-toggle" onClick={() => setShowHistory(v => !v)}>
+            <span>🕐</span>
+            <span>Previous Runs ({runHistory.length})</span>
+            <span style={{ marginLeft: 'auto' }}>{showHistory ? '▲' : '▼'}</span>
+          </button>
+          {showHistory && (
+            <div className="history-list">
+              {runHistory.map(run => (
+                <div
+                  key={run.id}
+                  className={`history-item${viewingHistoryRun?.id === run.id ? ' active' : ''}`}
+                >
+                  <div className="date">{new Date(run.timestamp).toLocaleString()}</div>
+                  <div className="kpis">
+                    Rev: {formatLargeCurrency(run.kpis.aR)} &nbsp;|&nbsp;
+                    GP: {formatLargeCurrency(run.kpis.aGP)} &nbsp;|&nbsp;
+                    NI: {formatLargeCurrency(run.kpis.aNI)}
+                  </div>
+                  <div className="meta">
+                    {run.checks.filter(c => c.pass).length}/{run.checks.length} checks passed
+                    &nbsp;·&nbsp; {run.taskCount} tasks
+                    &nbsp;·&nbsp; {(run.duration / 1000).toFixed(0)}s
+                  </div>
+                  <div className="actions">
+                    <button onClick={() => loadHistoryRun(run)}>View Details</button>
+                    <button
+                      onClick={() => setCompareRun(prev => prev?.id === run.id ? null : run)}
+                      style={compareRun?.id === run.id ? { background: '#6366f1', color: 'white' } : undefined}
+                    >
+                      {compareRun?.id === run.id ? 'Cancel Compare' : 'Compare'}
+                    </button>
+                  </div>
+                </div>
+              ))}
+              <button className="clear-history-btn" onClick={clearHistory}>
+                Clear History
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ height: 48 }} />
     </div>
   );
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatRelativeTime(ts: number): string {
+  const diff = Math.floor((Date.now() - ts) / 1000);
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return `${Math.floor(diff / 60)} min ago`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
+  return `${Math.floor(diff / 86400)}d ago`;
 }
 
 // ─── Dashboard Page ───────────────────────────────────────────────────────────
@@ -1351,6 +1551,7 @@ function DashboardPage() {
   const [deptData, setDeptData] = useState<DeptRow[]>([]);
   const [headcountData, setHeadcountData] = useState<HeadcountRow[]>([]);
   const [dataSource, setDataSource] = useState<'live' | 'mock'>('live');
+  const [cacheTs, setCacheTs] = useState<number | null>(null);
 
   const [viewMode, setViewMode] = useState<ViewMode>('monthly');
   const [compareMode, setCompareMode] = useState(false);
@@ -1361,6 +1562,16 @@ function DashboardPage() {
   const [aiLoading, setAiLoading] = useState<Record<string, boolean>>({});
 
   useEffect(() => {
+    try {
+      const cached = localStorage.getItem(AI_CACHE_KEY);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        if (parsed.viewMode === viewMode && parsed.insights) {
+          setAiInsights(parsed.insights);
+          return;
+        }
+      }
+    } catch {}
     setAiInsights({});
   }, [viewMode]);
 
@@ -1377,7 +1588,13 @@ function DashboardPage() {
         const r = result as Record<string, unknown>;
         text = (r.result as string) ?? (r.content as string) ?? (r.text as string) ?? JSON.stringify(result);
       }
-      setAiInsights(prev => ({ ...prev, [key]: text || 'No insights available.' }));
+      setAiInsights(prev => {
+        const next = { ...prev, [key]: text || 'No insights available.' };
+        try {
+          localStorage.setItem(AI_CACHE_KEY, JSON.stringify({ timestamp: Date.now(), viewMode, insights: next }));
+        } catch {}
+        return next;
+      });
     } catch (err) {
       const msg = err instanceof Error && err.name === 'AbortError'
         ? 'Request timed out. Click AI Insights again to retry.'
@@ -1388,74 +1605,113 @@ function DashboardPage() {
     }
   }
 
-  useEffect(() => {
-    async function fetchAll() {
-      try {
-        const [pnlRaw, kpiRaw, deptRaw, hcRaw] = await Promise.all([
-          callMcpTool('aggregate_table_data', {
-            table_id: '8906',
-            dimensions: ['Reporting Month', 'Scenario'],
-            metrics: [{ field: 'Amount', agg: 'SUM' }],
-            filters: [
-              { name: 'Account Group L0', values: ['P&L'], is_excluded: false },
-              { name: 'Data Type', values: ['Activity'], is_excluded: false },
-            ],
-          }) as Promise<RawRow[]>,
-          callMcpTool('aggregate_table_data', {
-            table_id: '8906',
-            dimensions: ['Reporting Month', 'DR_KPI'],
-            metrics: [{ field: 'Amount', agg: 'SUM' }],
-            filters: [
-              { name: 'Account Group L0', values: ['P&L'], is_excluded: false },
-              { name: 'Data Type', values: ['Activity'], is_excluded: false },
-              { name: 'Scenario', values: ['Actuals'], is_excluded: false },
-            ],
-          }) as Promise<RawRow[]>,
-          callMcpTool('aggregate_table_data', {
-            table_id: '8906',
-            dimensions: ['Reporting Month', 'Department'],
-            metrics: [{ field: 'Amount', agg: 'SUM' }],
-            filters: [
-              { name: 'Scenario', values: ['Actuals'], is_excluded: false },
-              { name: 'Account Group L0', values: ['P&L'], is_excluded: false },
-              { name: 'Data Type', values: ['Activity'], is_excluded: false },
-            ],
-          }) as Promise<RawRow[]>,
-          callMcpTool('aggregate_table_data', {
-            table_id: '8932',
-            dimensions: ['Reporting Month', 'Department'],
-            metrics: [{ field: 'Headcount', agg: 'SUM' }],
-            filters: [
-              { name: 'Scenario', values: ['Actuals'], is_excluded: false },
-            ],
-          }) as Promise<RawRow[]>,
-        ]);
+  async function fetchAll(silent = false) {
+    if (!silent) setLoading(true);
+    try {
+      const [pnlRaw, kpiRaw, deptRaw, hcRaw] = await Promise.all([
+        callMcpTool('aggregate_table_data', {
+          table_id: '8906',
+          dimensions: ['Reporting Month', 'Scenario'],
+          metrics: [{ field: 'Amount', agg: 'SUM' }],
+          filters: [
+            { name: 'Account Group L0', values: ['P&L'], is_excluded: false },
+            { name: 'Data Type', values: ['Activity'], is_excluded: false },
+          ],
+        }) as Promise<RawRow[]>,
+        callMcpTool('aggregate_table_data', {
+          table_id: '8906',
+          dimensions: ['Reporting Month', 'DR_KPI'],
+          metrics: [{ field: 'Amount', agg: 'SUM' }],
+          filters: [
+            { name: 'Account Group L0', values: ['P&L'], is_excluded: false },
+            { name: 'Data Type', values: ['Activity'], is_excluded: false },
+            { name: 'Scenario', values: ['Actuals'], is_excluded: false },
+          ],
+        }) as Promise<RawRow[]>,
+        callMcpTool('aggregate_table_data', {
+          table_id: '8906',
+          dimensions: ['Reporting Month', 'Department'],
+          metrics: [{ field: 'Amount', agg: 'SUM' }],
+          filters: [
+            { name: 'Scenario', values: ['Actuals'], is_excluded: false },
+            { name: 'Account Group L0', values: ['P&L'], is_excluded: false },
+            { name: 'Data Type', values: ['Activity'], is_excluded: false },
+          ],
+        }) as Promise<RawRow[]>,
+        callMcpTool('aggregate_table_data', {
+          table_id: '8932',
+          dimensions: ['Reporting Month', 'Department'],
+          metrics: [{ field: 'Headcount', agg: 'SUM' }],
+          filters: [
+            { name: 'Scenario', values: ['Actuals'], is_excluded: false },
+          ],
+        }) as Promise<RawRow[]>,
+      ]);
 
-        const processedPnL = processPnLData(pnlRaw);
-        const processedKpi = processKpiData(kpiRaw);
-        const processedDept = processDeptData(deptRaw);
-        const processedHc = processHeadcountData(hcRaw);
+      const processedPnL = processPnLData(pnlRaw);
+      const processedKpi = processKpiData(kpiRaw);
+      const processedDept = processDeptData(deptRaw);
+      const processedHc = processHeadcountData(hcRaw);
 
-        if (processedPnL.length > 0) {
-          setPnlData(processedPnL);
-          setKpiData(processedKpi.length > 0 ? processedKpi : generateMockKpi());
-          setDeptData(processedDept.length > 0 ? processedDept : generateMockDept());
-          setHeadcountData(processedHc.length > 0 ? processedHc : generateMockHeadcount());
-          setDataSource('live');
-        } else {
-          throw new Error('No data returned');
-        }
-      } catch {
-        setPnlData(generateMockPnL());
-        setKpiData(generateMockKpi());
-        setDeptData(generateMockDept());
-        setHeadcountData(generateMockHeadcount());
-        setDataSource('mock');
-      } finally {
-        setLoading(false);
+      if (processedPnL.length > 0) {
+        const finalKpi = processedKpi.length > 0 ? processedKpi : generateMockKpi();
+        const finalDept = processedDept.length > 0 ? processedDept : generateMockDept();
+        const finalHc = processedHc.length > 0 ? processedHc : generateMockHeadcount();
+        setPnlData(processedPnL);
+        setKpiData(finalKpi);
+        setDeptData(finalDept);
+        setHeadcountData(finalHc);
+        setDataSource('live');
+        const now = Date.now();
+        setCacheTs(now);
+        try {
+          localStorage.setItem(DASHBOARD_CACHE_KEY, JSON.stringify({
+            timestamp: now,
+            pnlData: processedPnL,
+            kpiData: finalKpi,
+            deptData: finalDept,
+            headcountData: finalHc,
+            dataSource: 'live',
+          }));
+        } catch {}
+      } else {
+        throw new Error('No data returned');
       }
+    } catch {
+      const mockPnl = generateMockPnL();
+      const mockKpi = generateMockKpi();
+      const mockDept = generateMockDept();
+      const mockHc = generateMockHeadcount();
+      setPnlData(mockPnl);
+      setKpiData(mockKpi);
+      setDeptData(mockDept);
+      setHeadcountData(mockHc);
+      setDataSource('mock');
+    } finally {
+      setLoading(false);
     }
-    fetchAll();
+  }
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => {
+    let hasCached = false;
+    try {
+      const cachedStr = localStorage.getItem(DASHBOARD_CACHE_KEY);
+      if (cachedStr) {
+        const parsed = JSON.parse(cachedStr);
+        if (parsed.pnlData?.length > 0) {
+          setPnlData(parsed.pnlData);
+          setKpiData(parsed.kpiData ?? []);
+          setDeptData(parsed.deptData ?? []);
+          setHeadcountData(parsed.headcountData ?? []);
+          setCacheTs(parsed.timestamp);
+          setDataSource(parsed.dataSource ?? 'live');
+          setLoading(false);
+          hasCached = true;
+        }
+      }
+    } catch {}
+    fetchAll(hasCached);
   }, []);
 
   const availablePeriods = useMemo(
@@ -1534,6 +1790,18 @@ function DashboardPage() {
         <div className="header-right">
           {dataSource === 'mock' && <span className="badge badge-mock">Demo Data</span>}
           {dataSource === 'live' && <span className="badge badge-live">Live Data</span>}
+          {cacheTs && (
+            <div className="last-updated">
+              <span>Last updated: {formatRelativeTime(cacheTs)}</span>
+              <button
+                className="refresh-btn"
+                onClick={() => fetchAll(false)}
+                title="Refresh data"
+              >
+                ↻ Refresh
+              </button>
+            </div>
+          )}
           <span className="header-date">
             {new Date().toLocaleDateString('en-US', { month: 'long', year: 'numeric' })}
           </span>
