@@ -576,7 +576,8 @@ export default function App() {
   }, [viewMode]);
 
   async function fetchAiInsight(key: string, prompt: string) {
-    if (aiInsights[key]) return; // already cached
+    const cached = aiInsights[key];
+    if (cached && !cached.includes('Unable') && !cached.includes('timed out')) return; // already cached
     setAiLoading(prev => ({ ...prev, [key]: true }));
     try {
       const result = await callMcpTool('run_ai_agent', { prompt });
@@ -588,8 +589,11 @@ export default function App() {
         text = (r.result as string) ?? (r.content as string) ?? (r.text as string) ?? JSON.stringify(result);
       }
       setAiInsights(prev => ({ ...prev, [key]: text || 'No insights available.' }));
-    } catch {
-      setAiInsights(prev => ({ ...prev, [key]: 'Unable to generate insights at this time.' }));
+    } catch (err) {
+      const msg = err instanceof Error && err.name === 'AbortError'
+        ? 'Request timed out. Click AI Insights again to retry.'
+        : 'Unable to generate insights. Click again to retry.';
+      setAiInsights(prev => ({ ...prev, [key]: msg }));
     } finally {
       setAiLoading(prev => ({ ...prev, [key]: false }));
     }
@@ -705,6 +709,23 @@ export default function App() {
       month: r.month,
       variance: (r.Actuals ?? 0) - (r.Budget ?? 0),
     }));
+
+  // Pre-computed summaries for AI prompts (short, to avoid timeouts)
+  const pnlSummary = aggPnL.slice(-6).map(d =>
+    `${d.month} A:$${((d.Actuals ?? 0) / 1e6).toFixed(1)}M B:$${((d.Budget ?? 0) / 1e6).toFixed(1)}M`
+  ).join(', ');
+  const varSummary = varianceData.slice(-6).map(d =>
+    `${d.month}: ${d.variance > 0 ? '+' : ''}$${(d.variance / 1e6).toFixed(1)}M`
+  ).join(', ');
+  const latestKpiPeriod = aggKpi[aggKpi.length - 1];
+  const kpiSummary = latestKpiPeriod
+    ? KPI_CATEGORIES.map(cat => `${cat}: $${((latestKpiPeriod[cat] as number ?? 0) / 1e6).toFixed(1)}M`).join(', ')
+    : 'No data';
+  const deptSummary = deptData.slice(0, 8).map(d =>
+    `${d.department}: $${(d.amount / 1e6).toFixed(1)}M`
+  ).join(', ');
+  const hcSummary = aggHeadcount.slice(-6).map(d => `${d.month}: ${d.total}`).join(', ');
+  const totalHC = aggHeadcount.length > 0 ? aggHeadcount[aggHeadcount.length - 1].total : 0;
 
   // For monthly comparison: show as two bars side by side
   const monthlyBarData =
@@ -849,7 +870,7 @@ export default function App() {
                         onClick={() =>
                           fetchAiInsight(
                             'pnl',
-                            `You are an FP&A analyst. Analyze this P&L data showing Actuals vs Budget over time (${viewLabel} view). Identify: 1) Overall trend direction, 2) Months with biggest variance from budget, 3) Any concerning patterns, 4) Key takeaway for the CFO. Be concise, use bullet points. Data: ${JSON.stringify(aggPnL)}`
+                            `FP&A analyst: ${viewLabel} P&L trend. ${pnlSummary}. Give 3 bullet insights on trend, variance, and recommendation. Be very concise.`
                           )
                         }
                       />
@@ -967,7 +988,7 @@ export default function App() {
                       onClick={() =>
                         fetchAiInsight(
                           'pnl',
-                          `You are an FP&A analyst. Analyze this P&L data showing Actuals vs Budget over time (${viewLabel} view). Identify: 1) Overall trend direction, 2) Months with biggest variance from budget, 3) Any concerning patterns, 4) Key takeaway for the CFO. Be concise, use bullet points. Data: ${JSON.stringify(aggPnL)}`
+                          `FP&A analyst: ${viewLabel} P&L trend. ${pnlSummary}. Give 3 bullet insights on trend, variance, and recommendation. Be very concise.`
                         )
                       }
                     />
@@ -1003,7 +1024,7 @@ export default function App() {
                   onClick={() =>
                     fetchAiInsight(
                       'variance',
-                      `You are an FP&A analyst. Analyze these budget variances (Actuals minus Budget) in ${viewLabel} view. Identify: 1) Whether the company is generally over or under budget, 2) The worst variance months and likely causes, 3) Trend in variance (improving or worsening), 4) Recommended actions. Be concise, use bullet points. Data: ${JSON.stringify(varianceData)}`
+                      `FP&A analyst: Budget variance trend (${viewLabel}). Recent: ${varSummary}. Give 3 bullet insights. Be very concise.`
                     )
                   }
                 />
@@ -1048,7 +1069,7 @@ export default function App() {
                   onClick={() =>
                     fetchAiInsight(
                       'kpi',
-                      `You are an FP&A analyst. Analyze this KPI breakdown showing Compensation, D&A, Interest Expense, and Interest Income over time (${viewLabel} view). Identify: 1) Which cost category is growing fastest, 2) Any unusual spikes, 3) Compensation as % of total and if it's healthy, 4) Key insight. Be concise, use bullet points. Data: ${JSON.stringify(aggKpi)}`
+                      `FP&A analyst: KPI breakdown latest ${viewLabel}. ${kpiSummary}. Give 3 bullet insights on cost structure. Be very concise.`
                     )
                   }
                 />
@@ -1097,7 +1118,7 @@ export default function App() {
                   onClick={() =>
                     fetchAiInsight(
                       'headcount',
-                      `You are an HR/Finance analyst. Analyze headcount trends by department (${viewLabel} view). Identify: 1) Overall headcount trajectory, 2) Fastest growing departments, 3) Revenue per employee trend if possible, 4) Key workforce planning insight. Be concise, use bullet points. Data: ${JSON.stringify(aggHeadcount)}`
+                      `HR/Finance analyst: Headcount trend (${viewLabel}). Recent: ${hcSummary}. Total: ${totalHC}. Give 3 bullet insights. Be very concise.`
                     )
                   }
                 />
@@ -1141,7 +1162,7 @@ export default function App() {
                 onClick={() =>
                   fetchAiInsight(
                     'dept',
-                    `You are an FP&A analyst. Analyze department spending data. Identify: 1) Top spending departments and if their spend is justified, 2) Any departments with unusual growth, 3) Department cost distribution health, 4) Recommendations. Be concise, use bullet points. Data: ${JSON.stringify(deptData)}`
+                    `FP&A analyst: Top department spending. ${deptSummary}. Give 3 bullet insights. Be very concise.`
                   )
                 }
               />
