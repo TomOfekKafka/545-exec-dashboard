@@ -17,7 +17,8 @@ export async function callMcpTool(toolName: string, args: Record<string, unknown
       signal: controller.signal,
     });
     if (!response.ok) throw new Error(await response.text());
-    return await response.json();
+    const text = await response.text();
+    try { return JSON.parse(text); } catch { return text; }
   } finally {
     clearTimeout(timer);
   }
