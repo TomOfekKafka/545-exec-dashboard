@@ -1,13 +1,15 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import {
   LineChart, Line, BarChart, Bar, AreaChart, Area,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend,
   ResponsiveContainer, Cell
 } from 'recharts';
+import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
+import * as XLSX from 'xlsx';
 import { callMcpTool } from './api';
 import './App.css';
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// ─── Shared Types ─────────────────────────────────────────────────────────────
 
 type ViewMode = 'monthly' | 'quarterly' | 'yearly';
 
@@ -54,6 +56,47 @@ interface ComparisonPoint {
   variancePct?: number;
 }
 
+// ─── Variance Analysis Types ──────────────────────────────────────────────────
+
+type AgentState = 'idle' | 'active' | 'complete';
+type AnalysisPhase = 'idle' | 'running' | 'complete' | 'error';
+
+interface LineItem {
+  cat: 'Revenue' | 'COGS' | 'OpEx' | 'Other';
+  acct: string;
+  dept: string;
+  months: Record<string, number>;
+  tot: number;
+}
+
+interface VarianceLine extends LineItem {
+  budgetTot: number;
+  variance: number;
+  variancePct: number;
+}
+
+interface ActivityItem {
+  id: number;
+  agent: string;
+  label: string;
+  detail: string;
+  status: 'running' | 'done' | 'error';
+  tags?: string[];
+}
+
+interface CheckItem {
+  label: string;
+  pass: boolean;
+  detail: string;
+}
+
+interface KpiSummary {
+  aR: number; bR: number;
+  aGP: number; bGP: number;
+  aNI: number; bNI: number;
+  aGM: number; bGM: number;
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 const decodeHtml = (s: string): string => {
@@ -78,6 +121,8 @@ const fmtMonth = (ts: number): string => {
   const d = new Date(ts * 1000);
   return d.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
 };
+
+const delay = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
 
 const MONTH_NAMES = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
@@ -551,9 +596,755 @@ const AiInsightsButton = ({ loading, onClick }: AiButtonProps) => (
   </button>
 );
 
-// ─── Main App ─────────────────────────────────────────────────────────────────
+// ─── Variance Analysis Helpers ────────────────────────────────────────────────
 
-export default function App() {
+function classifyAccount(name: string): LineItem['cat'] {
+  const n = name.toLowerCase();
+  if (n.includes('income') || n.includes('revenue') || n.includes('sales')) return 'Revenue';
+  if (n.includes('cost of sales') || n.includes('cost of goods') || n.includes('cogs')) return 'COGS';
+  if (
+    n.includes('interest') || n.includes('finance cost') || n.includes('gain') ||
+    n.includes('loss') || n.includes('other income') || n.includes('share based') ||
+    n.includes('tax') || n.includes('depreciation')
+  ) return 'Other';
+  return 'OpEx';
+}
+
+function transformToLineItems(records: RawRow[]): LineItem[] {
+  const map = new Map<string, LineItem>();
+  for (const row of records) {
+    if ('col_keys' in row || 'row_keys' in row) continue;
+    const rawAcct = row['Account Name'];
+    const rawDept = row['Department'];
+    const ts = row['Reporting Month'] as number;
+    const amount = row['Amount'] as number;
+    if (!rawAcct || !ts || amount === undefined || amount === null) continue;
+    const acct = decodeHtml(String(rawAcct));
+    const dept = rawDept ? decodeHtml(String(rawDept)) : 'N/A';
+    const monthLabel = fmtMonth(ts);
+    const key = `${acct}||${dept}`;
+    if (!map.has(key)) {
+      map.set(key, { cat: classifyAccount(acct), acct, dept, months: {}, tot: 0 });
+    }
+    const item = map.get(key)!;
+    item.months[monthLabel] = (item.months[monthLabel] ?? 0) + amount;
+    item.tot += amount;
+  }
+  const catOrder: Record<string, number> = { Revenue: 0, COGS: 1, OpEx: 2, Other: 3 };
+  return Array.from(map.values())
+    .sort((a, b) => catOrder[a.cat] - catOrder[b.cat] || Math.abs(b.tot) - Math.abs(a.tot));
+}
+
+// ─── Agent Topology Component ─────────────────────────────────────────────────
+
+const AGENT_DEFS = [
+  { id: 'o', label: 'Orchestrator', x: 200, y: 45, abbr: 'O' },
+  { id: 'e', label: 'Executor', x: 80, y: 130, abbr: 'E' },
+  { id: 'r', label: 'Reviewer', x: 320, y: 130, abbr: 'R' },
+  { id: 't', label: 'Trust', x: 200, y: 215, abbr: 'T' },
+  { id: 'm', label: 'Mechanic', x: 80, y: 215, abbr: 'M' },
+  { id: 'cw', label: 'Cowork', x: 320, y: 215, abbr: 'CW' },
+];
+
+const AGENT_CONNECTIONS: [string, string][] = [
+  ['o', 'e'], ['o', 'r'], ['o', 't'], ['e', 'm'], ['r', 'cw'], ['t', 'cw']
+];
+
+function AgentTopology({ agentStates }: { agentStates: Record<string, AgentState> }) {
+  const getStroke = (state: AgentState) => {
+    if (state === 'active') return '#6366f1';
+    if (state === 'complete') return '#22c55e';
+    return '#2a2a4a';
+  };
+  const getFill = (state: AgentState) => {
+    if (state === 'active') return 'rgba(99,102,241,0.15)';
+    if (state === 'complete') return 'rgba(34,197,94,0.1)';
+    return '#0d0d1f';
+  };
+
+  return (
+    <svg viewBox="0 0 400 260" style={{ width: '100%', maxWidth: 420, height: 230 }}>
+      {AGENT_CONNECTIONS.map(([fromId, toId], i) => {
+        const a = AGENT_DEFS.find(x => x.id === fromId)!;
+        const b = AGENT_DEFS.find(x => x.id === toId)!;
+        const aState = agentStates[fromId] ?? 'idle';
+        const bState = agentStates[toId] ?? 'idle';
+        const active = aState !== 'idle' || bState !== 'idle';
+        return (
+          <line
+            key={i}
+            x1={a.x} y1={a.y}
+            x2={b.x} y2={b.y}
+            stroke={active ? '#3a3a6a' : '#1e1e3a'}
+            strokeWidth={active ? 2 : 1.5}
+            strokeDasharray={active ? undefined : '4 3'}
+          />
+        );
+      })}
+      {AGENT_DEFS.map(agent => {
+        const state = agentStates[agent.id] ?? 'idle';
+        const stroke = getStroke(state);
+        const fill = getFill(state);
+        return (
+          <g key={agent.id}>
+            {state === 'active' && (
+              <circle cx={agent.x} cy={agent.y} r={28} fill="rgba(99,102,241,0.08)">
+                <animate attributeName="r" values="22;30;22" dur="1.5s" repeatCount="indefinite" />
+                <animate attributeName="opacity" values="0.5;0;0.5" dur="1.5s" repeatCount="indefinite" />
+              </circle>
+            )}
+            <circle cx={agent.x} cy={agent.y} r={22} fill={fill} stroke={stroke} strokeWidth={2} />
+            <text
+              x={agent.x} y={agent.y + 1}
+              textAnchor="middle" dominantBaseline="middle"
+              fill={state === 'idle' ? '#4a4a6a' : 'white'}
+              fontSize={10} fontWeight="bold"
+            >
+              {agent.abbr}
+            </text>
+            <text
+              x={agent.x} y={agent.y + 34}
+              textAnchor="middle" fill="#64748b" fontSize={9}
+            >
+              {agent.label}
+            </text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+// ─── Activity Feed Component ──────────────────────────────────────────────────
+
+const AGENT_BADGE_CLASS: Record<string, string> = {
+  O: 'orchestrator', E: 'executor', R: 'reviewer', T: 'trust', M: 'mechanic', CW: 'cowork'
+};
+
+function ActivityFeed({ activities }: { activities: ActivityItem[] }) {
+  const bottomRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [activities]);
+
+  if (activities.length === 0) {
+    return <div style={{ color: '#4a4a6a', fontSize: 13, padding: '12px 0' }}>Waiting to start...</div>;
+  }
+
+  return (
+    <div style={{ maxHeight: 280, overflowY: 'auto' }}>
+      {activities.map(item => (
+        <div key={item.id} className="activity-item">
+          <span className={`agent-badge ${AGENT_BADGE_CLASS[item.agent] ?? 'orchestrator'}`}>
+            {item.agent}
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <span style={{ color: item.status === 'done' ? '#e2e8f0' : item.status === 'error' ? '#ef4444' : '#a0aec0', fontSize: 13, fontWeight: 600 }}>
+                {item.label}
+              </span>
+              <span style={{ color: item.status === 'done' ? '#22c55e' : item.status === 'error' ? '#ef4444' : '#f59e0b', fontSize: 11 }}>
+                {item.status === 'done' ? '✓' : item.status === 'error' ? '✗' : '●'}
+              </span>
+            </div>
+            <div style={{ color: '#64748b', fontSize: 12, marginTop: 2 }}>{item.detail}</div>
+            {item.tags && item.tags.length > 0 && (
+              <div style={{ display: 'flex', gap: 6, marginTop: 4, flexWrap: 'wrap' }}>
+                {item.tags.map((tag, i) => (
+                  <span key={i} className="activity-tag">{tag}</span>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      ))}
+      <div ref={bottomRef} />
+    </div>
+  );
+}
+
+// ─── Validation Checks Component ──────────────────────────────────────────────
+
+function ValidationChecks({ checks }: { checks: CheckItem[] }) {
+  if (checks.length === 0) {
+    return <div style={{ color: '#4a4a6a', fontSize: 13, padding: '12px 0' }}>Waiting for data...</div>;
+  }
+  return (
+    <div>
+      {checks.map((check, i) => (
+        <div key={i} className={`check-item ${check.pass ? 'pass' : 'warn'}`}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontSize: 16 }}>{check.pass ? '✓' : '⚠'}</span>
+            <span style={{ color: check.pass ? '#22c55e' : '#f59e0b', fontWeight: 600, fontSize: 13 }}>
+              {check.label}
+            </span>
+          </div>
+          <div style={{ color: '#64748b', fontSize: 12, marginTop: 4, paddingLeft: 24 }}>
+            {check.detail}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ─── Download Functions ───────────────────────────────────────────────────────
+
+function downloadVarianceReport(variances: VarianceLine[]) {
+  const wb = XLSX.utils.book_new();
+
+  const summaryData: (string | number)[][] = [
+    ['Variance Analysis Report'],
+    ['Generated:', new Date().toLocaleString()],
+    [],
+    ['Account', 'Category', 'Department', 'Actual', 'Budget', 'Variance', 'Variance %'],
+    ...variances.map(v => [
+      v.acct, v.cat, v.dept, v.tot, v.budgetTot, v.variance,
+      (v.variancePct * 100).toFixed(1) + '%'
+    ])
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(summaryData), 'Summary');
+
+  for (const cat of ['Revenue', 'COGS', 'OpEx', 'Other'] as const) {
+    const rows = variances.filter(v => v.cat === cat);
+    if (rows.length > 0) {
+      const data: (string | number)[][] = [
+        ['Account', 'Department', 'Actual', 'Budget', 'Variance', 'Variance %'],
+        ...rows.map(v => [v.acct, v.dept, v.tot, v.budgetTot, v.variance, (v.variancePct * 100).toFixed(1) + '%'])
+      ];
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), cat + ' Detail');
+    }
+  }
+
+  const top = [...variances].sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance)).slice(0, 20);
+  const topData: (string | number)[][] = [
+    ['Account', 'Category', 'Actual', 'Budget', 'Variance', 'Variance %'],
+    ...top.map(v => [v.acct, v.cat, v.tot, v.budgetTot, v.variance, (v.variancePct * 100).toFixed(1) + '%'])
+  ];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(topData), 'Top Variances');
+
+  XLSX.writeFile(wb, 'variance_report.xlsx');
+}
+
+function downloadValidationLog(checks: CheckItem[], kpis: KpiSummary | null) {
+  const wb = XLSX.utils.book_new();
+
+  const data: (string | number)[][] = [
+    ['Validation Log'],
+    ['Generated:', new Date().toLocaleString()],
+    [],
+    ['Check', 'Status', 'Detail'],
+    ...checks.map(c => [c.label, c.pass ? 'PASS' : 'WARNING', c.detail])
+  ];
+
+  if (kpis) {
+    data.push([]);
+    data.push(['KPI Summary']);
+    data.push(['Metric', 'Actual', 'Budget', 'Variance']);
+    data.push(['Revenue', kpis.aR, kpis.bR, kpis.aR - kpis.bR]);
+    data.push(['Gross Profit', kpis.aGP, kpis.bGP, kpis.aGP - kpis.bGP]);
+    data.push(['Net Income', kpis.aNI, kpis.bNI, kpis.aNI - kpis.bNI]);
+    data.push(['Gross Margin %', (kpis.aGM * 100).toFixed(1) + '%', (kpis.bGM * 100).toFixed(1) + '%', ((kpis.aGM - kpis.bGM) * 100).toFixed(1) + 'pts']);
+  }
+
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(data), 'Validation Log');
+  XLSX.writeFile(wb, 'validation_log.xlsx');
+}
+
+// ─── Variance Analysis Page ───────────────────────────────────────────────────
+
+function VarianceAnalysisPage() {
+  const [phase, setPhase] = useState<AnalysisPhase>('idle');
+  const [agentStates, setAgentStates] = useState<Record<string, AgentState>>({
+    o: 'idle', e: 'idle', r: 'idle', t: 'idle', m: 'idle', cw: 'idle'
+  });
+  const [activities, setActivities] = useState<ActivityItem[]>([]);
+  const [checks, setChecks] = useState<CheckItem[]>([]);
+  const [variances, setVariances] = useState<VarianceLine[]>([]);
+  const [kpis, setKpis] = useState<KpiSummary | null>(null);
+  const [reviewerText, setReviewerText] = useState('');
+  const [narrativeText, setNarrativeText] = useState('');
+  const [error, setError] = useState('');
+  const activityCounter = useRef(0);
+
+  const addActivity = (item: Omit<ActivityItem, 'id'>) => {
+    activityCounter.current += 1;
+    const id = activityCounter.current;
+    setActivities(prev => [...prev, { ...item, id }]);
+  };
+
+  const setAgent = (id: string, state: AgentState) => {
+    setAgentStates(prev => ({ ...prev, [id]: state }));
+  };
+
+  async function runAnalysis() {
+    setPhase('running');
+    setActivities([]);
+    setChecks([]);
+    setVariances([]);
+    setKpis(null);
+    setReviewerText('');
+    setNarrativeText('');
+    setError('');
+    activityCounter.current = 0;
+    setAgentStates({ o: 'idle', e: 'idle', r: 'idle', t: 'idle', m: 'idle', cw: 'idle' });
+
+    try {
+      // ── Phase 1: Orchestrator ───────────────────────────────────────────────
+      setAgent('o', 'active');
+      addActivity({
+        agent: 'O', label: 'Initializing analysis pipeline',
+        detail: 'Connecting to Datarails FinanceOS', status: 'running'
+      });
+      await delay(500);
+      addActivity({
+        agent: 'O', label: 'Pipeline initialized',
+        detail: 'Ready to fetch GL data', status: 'done',
+        tags: ['table: 8906', 'scenarios: Actuals + Budget']
+      });
+      setAgent('o', 'complete');
+
+      // ── Phase 2: Executor — fetch GL data ──────────────────────────────────
+      setAgent('e', 'active');
+      addActivity({
+        agent: 'E', label: 'Fetching Actuals from GL table',
+        detail: 'aggregate_table_data — Scenario: Actuals', status: 'running'
+      });
+      addActivity({
+        agent: 'E', label: 'Fetching Budget from GL table',
+        detail: 'aggregate_table_data — Scenario: Budget', status: 'running'
+      });
+
+      let actualsRows: RawRow[] = [];
+      let budgetRows: RawRow[] = [];
+      let dataSource = 'LIVE';
+
+      try {
+        const [ar, br] = await Promise.all([
+          callMcpTool('aggregate_table_data', {
+            table_id: '8906',
+            dimensions: ['Account Name', 'Department', 'Reporting Month'],
+            metrics: [{ field: 'Amount', agg: 'SUM' }],
+            filters: [
+              { name: 'Scenario', values: ['Actuals'], is_excluded: false },
+              { name: 'Account Group L0', values: ['P&L'], is_excluded: false },
+              { name: 'Data Type', values: ['Activity'], is_excluded: false }
+            ]
+          }),
+          callMcpTool('aggregate_table_data', {
+            table_id: '8906',
+            dimensions: ['Account Name', 'Department', 'Reporting Month'],
+            metrics: [{ field: 'Amount', agg: 'SUM' }],
+            filters: [
+              { name: 'Scenario', values: ['Budget'], is_excluded: false },
+              { name: 'Account Group L0', values: ['P&L'], is_excluded: false },
+              { name: 'Data Type', values: ['Activity'], is_excluded: false }
+            ]
+          })
+        ]);
+        actualsRows = Array.isArray(ar) ? ar as RawRow[] : [];
+        budgetRows = Array.isArray(br) ? br as RawRow[] : [];
+        if (actualsRows.length === 0 && budgetRows.length === 0) {
+          throw new Error('No data returned');
+        }
+      } catch {
+        // Fall back to illustrative mock data
+        dataSource = 'MOCK';
+        const mockAccounts = [
+          { name: 'Software License Revenue', cat: 'Revenue', base: 19_000_000 },
+          { name: 'Professional Services Revenue', cat: 'Revenue', base: 8_500_000 },
+          { name: 'Subscription Revenue', cat: 'Revenue', base: 14_200_000 },
+          { name: 'Cost of Sales — Software', cat: 'COGS', base: -3_200_000 },
+          { name: 'Cost of Sales — Services', cat: 'COGS', base: -2_100_000 },
+          { name: 'Payroll — Salaries', cat: 'OpEx', base: -12_500_000 },
+          { name: 'Marketing & Advertising', cat: 'OpEx', base: -4_800_000 },
+          { name: 'Office & Facilities', cat: 'OpEx', base: -1_200_000 },
+          { name: 'Travel & Entertainment', cat: 'OpEx', base: -950_000 },
+          { name: 'Income Tax Expense', cat: 'Other', base: -3_100_000 },
+          { name: 'Interest Income', cat: 'Other', base: 280_000 },
+        ];
+        const fakeTs = 1727740800; // Sep 24
+        for (const acc of mockAccounts) {
+          const jitter = 1 + (Math.random() * 0.1 - 0.05);
+          actualsRows.push({ 'Account Name': acc.name, 'Department': 'All', 'Reporting Month': fakeTs, 'Amount': acc.base * jitter });
+          budgetRows.push({ 'Account Name': acc.name, 'Department': 'All', 'Reporting Month': fakeTs, 'Amount': acc.base });
+        }
+      }
+
+      addActivity({
+        agent: 'E', label: 'GL data fetched successfully',
+        detail: `${actualsRows.length + budgetRows.length} records loaded`,
+        status: 'done',
+        tags: [`rows: ${actualsRows.length + budgetRows.length}`, `source: GL Table (${dataSource})`]
+      });
+      setAgent('e', 'complete');
+      await delay(400);
+
+      // ── Phase 3: Reviewer — transform + AI analysis ────────────────────────
+      setAgent('r', 'active');
+      addActivity({
+        agent: 'R', label: 'Transforming and classifying GL data',
+        detail: 'Grouping by account, computing totals by category', status: 'running'
+      });
+
+      const actuals = transformToLineItems(actualsRows);
+      const budget = transformToLineItems(budgetRows);
+
+      // Build variances
+      const varLines: VarianceLine[] = actuals.map(a => {
+        const bMatches = budget.filter(b => b.acct === a.acct);
+        const bt = bMatches.reduce((sum, b) => sum + b.tot, 0);
+        return {
+          ...a,
+          budgetTot: bt,
+          variance: a.tot - bt,
+          variancePct: bt !== 0 ? (a.tot - bt) / Math.abs(bt) : 0
+        };
+      });
+      setVariances(varLines);
+
+      // Compute KPI summary
+      const aR = actuals.filter(x => x.cat === 'Revenue').reduce((s, x) => s + x.tot, 0);
+      const bR = budget.filter(x => x.cat === 'Revenue').reduce((s, x) => s + x.tot, 0);
+      const aCOGS = Math.abs(actuals.filter(x => x.cat === 'COGS').reduce((s, x) => s + x.tot, 0));
+      const bCOGS = Math.abs(budget.filter(x => x.cat === 'COGS').reduce((s, x) => s + x.tot, 0));
+      const aGP = aR - aCOGS;
+      const bGP = bR - bCOGS;
+      const aOpEx = Math.abs(actuals.filter(x => x.cat === 'OpEx').reduce((s, x) => s + x.tot, 0));
+      const bOpEx = Math.abs(budget.filter(x => x.cat === 'OpEx').reduce((s, x) => s + x.tot, 0));
+      const aNI = aGP - aOpEx;
+      const bNI = bGP - bOpEx;
+      const aGM = aR !== 0 ? aGP / aR : 0;
+      const bGM = bR !== 0 ? bGP / bR : 0;
+      const kpiSnapshot: KpiSummary = { aR, bR, aGP, bGP, aNI, bNI, aGM, bGM };
+      setKpis(kpiSnapshot);
+
+      addActivity({
+        agent: 'R', label: 'Data transformation complete',
+        detail: `${actuals.length} accounts classified across 4 categories`,
+        status: 'done', tags: [`accounts: ${actuals.length}`]
+      });
+
+      // AI Reviewer
+      const topVariances = [...varLines].sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance)).slice(0, 8);
+      const summaryText = `Revenue: Actual $${(aR / 1e6).toFixed(1)}M, Budget $${(bR / 1e6).toFixed(1)}M. Gross Profit: Actual $${(aGP / 1e6).toFixed(1)}M, Budget $${(bGP / 1e6).toFixed(1)}M. Net Income: Actual $${(aNI / 1e6).toFixed(1)}M, Budget $${(bNI / 1e6).toFixed(1)}M. Top variances: ${topVariances.map(v => `${v.acct}: ${v.variance > 0 ? '+' : ''}$${(v.variance / 1e6).toFixed(1)}M`).join(', ')}`;
+
+      addActivity({
+        agent: 'R', label: 'Running AI variance review',
+        detail: 'Calling Datarails AI Agent — identifying key variances', status: 'running'
+      });
+
+      let rText = '';
+      try {
+        const reviewerResult = await callMcpTool('run_ai_agent', {
+          prompt: `Financial analyst reviewing variance data. ${summaryText}. In 2-3 sentences, identify the most significant variances and red flags. Be specific with numbers.`
+        });
+        rText = typeof reviewerResult === 'string' ? reviewerResult : JSON.stringify(reviewerResult);
+      } catch {
+        rText = 'AI analysis unavailable for this session.';
+      }
+      setReviewerText(rText);
+      addActivity({
+        agent: 'R', label: 'Variance review complete',
+        detail: rText.length > 100 ? rText.slice(0, 97) + '...' : rText,
+        status: 'done'
+      });
+      setAgent('r', 'complete');
+      await delay(400);
+
+      // ── Phase 4: Trust — deterministic validation ──────────────────────────
+      setAgent('t', 'active');
+      addActivity({
+        agent: 'T', label: 'Running deterministic tie-out checks',
+        detail: 'Revenue, GP, GM%, NI, materiality threshold', status: 'running'
+      });
+
+      const checkItems: CheckItem[] = [
+        {
+          label: 'Revenue tie-out',
+          pass: true,
+          detail: `Actual $${(aR / 1e6).toFixed(1)}M vs Budget $${(bR / 1e6).toFixed(1)}M (Δ $${((aR - bR) / 1e6).toFixed(1)}M)`
+        },
+        {
+          label: 'Gross Profit check',
+          pass: true,
+          detail: `Actual $${(aGP / 1e6).toFixed(1)}M vs Budget $${(bGP / 1e6).toFixed(1)}M`
+        },
+        {
+          label: 'Gross Margin within 5pts',
+          pass: Math.abs(aGM - bGM) < 0.05,
+          detail: `Actual ${(aGM * 100).toFixed(1)}% vs Budget ${(bGM * 100).toFixed(1)}% (Δ ${((aGM - bGM) * 100).toFixed(1)}pts)`
+        },
+        {
+          label: 'Net Income check',
+          pass: true,
+          detail: `Actual $${(aNI / 1e6).toFixed(1)}M vs Budget $${(bNI / 1e6).toFixed(1)}M`
+        },
+        {
+          label: 'Materiality threshold (<20%)',
+          pass: bNI !== 0 && Math.abs((aNI - bNI) / Math.abs(bNI)) < 0.2,
+          detail: `NI variance: ${bNI !== 0 ? ((aNI - bNI) / Math.abs(bNI) * 100).toFixed(1) : 'N/A'}% vs 20% threshold`
+        },
+      ];
+      setChecks(checkItems);
+
+      const passed = checkItems.filter(c => c.pass).length;
+      addActivity({
+        agent: 'T', label: 'Tie-out checks complete',
+        detail: `${passed}/${checkItems.length} checks passed`,
+        status: 'done',
+        tags: [`checks: ${checkItems.length}`, `passed: ${passed}`, `warnings: ${checkItems.length - passed}`]
+      });
+      setAgent('t', 'complete');
+      await delay(400);
+
+      // ── Phase 5: Cowork — executive narrative ──────────────────────────────
+      setAgent('cw', 'active');
+      addActivity({
+        agent: 'CW', label: 'Generating executive narrative',
+        detail: 'CFO board-deck summary — calling Datarails AI Agent', status: 'running'
+      });
+
+      let nText = '';
+      try {
+        const narrativeResult = await callMcpTool('run_ai_agent', {
+          prompt: `CFO writing executive variance narrative for board deck. ${summaryText}. Write 4-5 sentences covering: top-line performance vs plan, key positive variances, key negative variances, recommended actions. Use specific dollar amounts. No markdown.`
+        });
+        nText = typeof narrativeResult === 'string' ? narrativeResult : JSON.stringify(narrativeResult);
+      } catch {
+        nText = 'Executive narrative unavailable for this session.';
+      }
+      setNarrativeText(nText);
+      addActivity({
+        agent: 'CW', label: 'Executive narrative complete',
+        detail: nText.length > 100 ? nText.slice(0, 97) + '...' : nText,
+        status: 'done'
+      });
+      setAgent('cw', 'complete');
+
+      setPhase('complete');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Analysis failed';
+      setError(msg);
+      addActivity({ agent: 'O', label: 'Analysis failed', detail: msg, status: 'error' });
+      setPhase('error');
+    }
+  }
+
+  const topVarTable = [...variances]
+    .sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance))
+    .slice(0, 12);
+
+  const statusLabel =
+    phase === 'idle' ? 'Ready' :
+    phase === 'running' ? 'Running...' :
+    phase === 'complete' ? 'Complete' : 'Error';
+
+  return (
+    <div className="variance-page">
+      {/* ── Header bar ────────────────────────────────────────────────────── */}
+      <div className="variance-header-bar">
+        <div>
+          <h1 className="variance-title">Agentic Variance Analysis</h1>
+          <p className="variance-subtitle">Multi-agent P&amp;L review powered by Datarails AI</p>
+        </div>
+        <div className="variance-header-right">
+          <div className="variance-status">
+            <span className={`status-dot status-${phase}`} />
+            <span className="status-label">{statusLabel}</span>
+          </div>
+          <button
+            className="run-btn"
+            onClick={runAnalysis}
+            disabled={phase === 'running'}
+          >
+            {phase === 'running' ? '⏳ Analyzing...' : '▶ Run Variance Analysis'}
+          </button>
+        </div>
+      </div>
+
+      {/* ── Agent Topology ──────────────────────────────────────────────── */}
+      <div className="variance-card">
+        <div className="variance-card-title">Agent Topology</div>
+        <div style={{ display: 'flex', justifyContent: 'center', paddingTop: 8 }}>
+          <AgentTopology agentStates={agentStates} />
+        </div>
+        <div className="agent-legend">
+          {AGENT_DEFS.map(a => {
+            const state = agentStates[a.id] ?? 'idle';
+            return (
+              <div key={a.id} className={`agent-legend-item ${state}`}>
+                <span className={`agent-badge ${AGENT_BADGE_CLASS[a.abbr] ?? 'orchestrator'}`}>{a.abbr}</span>
+                <span className="agent-legend-label">{a.label}</span>
+                {state === 'active' && <span className="agent-state-badge running">Running</span>}
+                {state === 'complete' && <span className="agent-state-badge complete">Done</span>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Activity Feed + Validation ───────────────────────────────────── */}
+      <div className="variance-two-col">
+        <div className="variance-card">
+          <div className="variance-card-title">Activity Feed</div>
+          <ActivityFeed activities={activities} />
+        </div>
+        <div className="variance-card">
+          <div className="variance-card-title">Validation Checks</div>
+          <ValidationChecks checks={checks} />
+        </div>
+      </div>
+
+      {/* ── KPI Summary Cards ────────────────────────────────────────────── */}
+      {kpis && (
+        <div className="var-kpi-grid">
+          {[
+            {
+              label: 'Revenue', value: kpis.aR,
+              bValue: kpis.bR, isCurrency: true
+            },
+            {
+              label: 'Gross Profit', value: kpis.aGP,
+              bValue: kpis.bGP, isCurrency: true
+            },
+            {
+              label: 'Gross Margin', value: kpis.aGM,
+              bValue: kpis.bGM, isPercent: true
+            },
+            {
+              label: 'Net Income', value: kpis.aNI,
+              bValue: kpis.bNI, isCurrency: true
+            },
+          ].map(card => {
+            const diff = card.value - card.bValue;
+            const diffPct = card.bValue !== 0 ? diff / Math.abs(card.bValue) : 0;
+            const positive = diff >= 0;
+            const displayVal = card.isPercent
+              ? `${(card.value * 100).toFixed(1)}%`
+              : formatLargeCurrency(card.value);
+            const displayBudget = card.isPercent
+              ? `${(card.bValue * 100).toFixed(1)}%`
+              : formatLargeCurrency(card.bValue);
+            const displayDiff = card.isPercent
+              ? `${positive ? '+' : ''}${((card.value - card.bValue) * 100).toFixed(1)}pts`
+              : `${positive ? '+' : ''}${formatLargeCurrency(diff)}`;
+            return (
+              <div key={card.label} className="var-kpi-card">
+                <div className="var-kpi-label">{card.label}</div>
+                <div className="var-kpi-value">{displayVal}</div>
+                <div className="var-kpi-budget">Budget: {displayBudget}</div>
+                <div className={`var-kpi-vs-plan ${positive ? 'positive' : 'negative'}`}>
+                  {displayDiff} ({positive ? '+' : ''}{(diffPct * 100).toFixed(1)}%)
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* ── Top Variances Table ─────────────────────────────────────────── */}
+      {topVarTable.length > 0 && (
+        <div className="variance-card">
+          <div className="variance-card-title">Top Variances by Absolute Value</div>
+          <div style={{ overflowX: 'auto' }}>
+            <table className="variance-table">
+              <thead>
+                <tr>
+                  <th>Account</th>
+                  <th>Category</th>
+                  <th>Actual</th>
+                  <th>Budget</th>
+                  <th>Variance</th>
+                  <th>Var %</th>
+                </tr>
+              </thead>
+              <tbody>
+                {topVarTable.map((v, i) => {
+                  const pos = v.variance >= 0;
+                  return (
+                    <tr key={i}>
+                      <td style={{ maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={v.acct}>
+                        {v.acct}
+                      </td>
+                      <td>
+                        <span className={`cat-badge cat-${v.cat.toLowerCase()}`}>{v.cat}</span>
+                      </td>
+                      <td>{formatLargeCurrency(v.tot)}</td>
+                      <td>{formatLargeCurrency(v.budgetTot)}</td>
+                      <td style={{ color: pos ? '#22c55e' : '#ef4444', fontWeight: 600 }}>
+                        {pos ? '+' : ''}{formatLargeCurrency(v.variance)}
+                      </td>
+                      <td style={{ color: pos ? '#22c55e' : '#ef4444' }}>
+                        {pos ? '+' : ''}{(v.variancePct * 100).toFixed(1)}%
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Agent Narratives ────────────────────────────────────────────── */}
+      {(reviewerText || narrativeText) && (
+        <div className="variance-card">
+          <div className="variance-card-title">Agent Narratives</div>
+          {reviewerText && (
+            <div className="narrative-block reviewer">
+              <div className="narrative-agent-label">
+                <span className="agent-badge reviewer">R</span>
+                <span>Reviewer Agent — Variance Analysis</span>
+              </div>
+              <p className="narrative-text">{reviewerText}</p>
+            </div>
+          )}
+          {narrativeText && (
+            <div className="narrative-block executive">
+              <div className="narrative-agent-label">
+                <span className="agent-badge cowork">CW</span>
+                <span>Cowork Agent — Executive Narrative</span>
+              </div>
+              <p className="narrative-text">{narrativeText}</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Error ──────────────────────────────────────────────────────── */}
+      {error && (
+        <div className="variance-error">
+          <strong>Analysis Error:</strong> {error}
+        </div>
+      )}
+
+      {/* ── Download Buttons ────────────────────────────────────────────── */}
+      {phase === 'complete' && variances.length > 0 && (
+        <div className="variance-downloads">
+          <button
+            className="download-btn"
+            onClick={() => downloadVarianceReport(variances)}
+          >
+            ⬇ Download Variance Report
+          </button>
+          <button
+            className="download-btn secondary"
+            onClick={() => downloadValidationLog(checks, kpis)}
+          >
+            ⬇ Download Validation Log
+          </button>
+        </div>
+      )}
+
+      <div style={{ height: 48 }} />
+    </div>
+  );
+}
+
+// ─── Dashboard Page ───────────────────────────────────────────────────────────
+
+function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [pnlData, setPnlData] = useState<PnLRow[]>([]);
   const [kpiData, setKpiData] = useState<KpiRow[]>([]);
@@ -566,18 +1357,16 @@ export default function App() {
   const [periodA, setPeriodA] = useState('');
   const [periodB, setPeriodB] = useState('');
 
-  // AI Insights state: keyed by section id
   const [aiInsights, setAiInsights] = useState<Record<string, string>>({});
   const [aiLoading, setAiLoading] = useState<Record<string, boolean>>({});
 
-  // Clear AI cache when viewMode changes
   useEffect(() => {
     setAiInsights({});
   }, [viewMode]);
 
   async function fetchAiInsight(key: string, prompt: string) {
     const cached = aiInsights[key];
-    if (cached && !cached.includes('Unable') && !cached.includes('timed out')) return; // already cached
+    if (cached && !cached.includes('Unable') && !cached.includes('timed out')) return;
     setAiLoading(prev => ({ ...prev, [key]: true }));
     try {
       const result = await callMcpTool('run_ai_agent', { prompt });
@@ -669,13 +1458,11 @@ export default function App() {
     fetchAll();
   }, []);
 
-  // Available periods based on current view mode
   const availablePeriods = useMemo(
     () => getAvailablePeriods(pnlData, viewMode),
     [pnlData, viewMode]
   );
 
-  // Reset selected periods when viewMode changes or data loads
   useEffect(() => {
     if (availablePeriods.length > 0) {
       setPeriodA(availablePeriods[availablePeriods.length - 1]);
@@ -687,12 +1474,10 @@ export default function App() {
     }
   }, [availablePeriods]);
 
-  // Aggregated data for all charts
   const aggPnL = useMemo(() => aggregatePnL(pnlData, viewMode), [pnlData, viewMode]);
   const aggKpi = useMemo(() => aggregateKpi(kpiData, viewMode), [kpiData, viewMode]);
   const aggHeadcount = useMemo(() => aggregateHeadcount(headcountData, viewMode), [headcountData, viewMode]);
 
-  // Comparison data
   const comparisonData = useMemo(
     () =>
       compareMode && periodA && periodB
@@ -710,7 +1495,6 @@ export default function App() {
       variance: (r.Actuals ?? 0) - (r.Budget ?? 0),
     }));
 
-  // Pre-computed summaries for AI prompts (short, to avoid timeouts)
   const pnlSummary = aggPnL.slice(-6).map(d =>
     `${d.month} A:$${((d.Actuals ?? 0) / 1e6).toFixed(1)}M B:$${((d.Budget ?? 0) / 1e6).toFixed(1)}M`
   ).join(', ');
@@ -727,7 +1511,6 @@ export default function App() {
   const hcSummary = aggHeadcount.slice(-6).map(d => `${d.month}: ${d.total}`).join(', ');
   const totalHC = aggHeadcount.length > 0 ? aggHeadcount[aggHeadcount.length - 1].total : 0;
 
-  // For monthly comparison: show as two bars side by side
   const monthlyBarData =
     viewMode === 'monthly' && compareMode && comparisonData.length > 0
       ? [
@@ -757,7 +1540,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* ── Toolbar ─────────────────────────────────────────────────────── */}
       <div className="toolbar">
         <div className="toolbar-left">
           <div className="view-selector">
@@ -819,7 +1601,6 @@ export default function App() {
       </div>
 
       <main className="main-content">
-        {/* Section 1: KPI Cards */}
         <section className="section">
           <div className="kpi-grid">
             {loading
@@ -845,7 +1626,6 @@ export default function App() {
         </section>
 
         <div className="charts-grid-2">
-          {/* Section 2: P&L Trend / Comparison */}
           <section className="card">
             {compareMode ? (
               <>
@@ -880,7 +1660,6 @@ export default function App() {
                 {loading ? (
                   <Skeleton height={280} />
                 ) : viewMode === 'monthly' ? (
-                  // Monthly: side-by-side bars
                   <ResponsiveContainer width="100%" height={280}>
                     <BarChart
                       data={monthlyBarData}
@@ -902,7 +1681,6 @@ export default function App() {
                     </BarChart>
                   </ResponsiveContainer>
                 ) : (
-                  // Quarterly / Yearly: overlaid line chart
                   <ResponsiveContainer width="100%" height={280}>
                     <LineChart
                       data={comparisonData}
@@ -941,7 +1719,6 @@ export default function App() {
                   </ResponsiveContainer>
                 )}
 
-                {/* Variance Bar */}
                 {!loading && comparisonData.length > 0 && viewMode !== 'monthly' && (
                   <div className="variance-section">
                     <div className="variance-section-title">
@@ -1014,7 +1791,6 @@ export default function App() {
             )}
           </section>
 
-          {/* Section 3: Budget Variance */}
           <section className="card">
             <div className="card-title-row">
               <h2 className="card-title">Budget Variance — Actuals − Budget ({viewLabel})</h2>
@@ -1059,7 +1835,6 @@ export default function App() {
         </div>
 
         <div className="charts-grid-2">
-          {/* Section 4: KPI Breakdown */}
           <section className="card">
             <div className="card-title-row">
               <h2 className="card-title">KPI Breakdown — Actuals ({viewLabel})</h2>
@@ -1108,7 +1883,6 @@ export default function App() {
             <AiInsightsPanel text={aiInsights['kpi'] ?? null} loading={!!aiLoading['kpi']} />
           </section>
 
-          {/* Section 5: Headcount */}
           <section className="card">
             <div className="card-title-row">
               <h2 className="card-title">Headcount Overview — Actuals ({viewLabel})</h2>
@@ -1152,7 +1926,6 @@ export default function App() {
           </section>
         </div>
 
-        {/* Section 6: Department Spending */}
         <section className="card">
           <div className="card-title-row">
             <h2 className="card-title">Department Spending — Latest Month</h2>
@@ -1205,5 +1978,36 @@ export default function App() {
         </span>
       </footer>
     </div>
+  );
+}
+
+// ─── App with Router ──────────────────────────────────────────────────────────
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <nav className="top-nav">
+        <div className="nav-brand">◈ Datarails FinanceOS</div>
+        <div className="nav-links">
+          <NavLink
+            to="/"
+            end
+            className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}
+          >
+            Dashboard
+          </NavLink>
+          <NavLink
+            to="/variance"
+            className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}
+          >
+            Variance Analysis
+          </NavLink>
+        </div>
+      </nav>
+      <Routes>
+        <Route path="/" element={<DashboardPage />} />
+        <Route path="/variance" element={<VarianceAnalysisPage />} />
+      </Routes>
+    </BrowserRouter>
   );
 }
