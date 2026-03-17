@@ -1,0 +1,93 @@
+name: Claude Code Build
+on:
+  workflow_dispatch:
+    inputs:
+      prompt:
+        description: 'Prompt for Claude Code to generate or modify the app'
+        required: true
+        type: string
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install Claude Code
+        run: npm install -g @anthropic-ai/claude-code
+      - name: Configure MCP server for API access
+        env:
+          DR_SESSION_ID: ${{ secrets.DR_SESSION_ID }}
+          DR_CSRF_TOKEN: ${{ secrets.DR_CSRF_TOKEN }}
+          DR_DOMAIN: ${{ secrets.DR_DOMAIN }}
+        run: |
+          mkdir -p .claude
+          cat > .claude/settings.json << 'SETTINGS'
+          {
+            "mcpServers": {
+              "datarails": {
+                "type": "sse",
+                "url": "https://mcp-poc-tom.azurewebsites.net/mcp-sse/sse",
+                "headers": {
+                  "X-Session-Id": "${DR_SESSION_ID}",
+                  "X-Csrf-Token": "${DR_CSRF_TOKEN}",
+                  "X-Domain": "${DR_DOMAIN}"
+                }
+              }
+            }
+          }
+          SETTINGS
+      - name: Generate code with Claude Code
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          DR_SESSION_ID: ${{ secrets.DR_SESSION_ID }}
+          DR_CSRF_TOKEN: ${{ secrets.DR_CSRF_TOKEN }}
+          DR_DOMAIN: ${{ secrets.DR_DOMAIN }}
+          APP_PROMPT: |
+            ${{ github.event.inputs.prompt }}
+
+            IMPORTANT: After generating all code, you MUST run these commands and fix any errors before finishing:
+            1. npm install
+            2. npm run build
+            If the build fails, fix the errors and rebuild until it succeeds.
+            Do NOT finish until 'npm run build' passes cleanly.
+
+            TESTING: You have access to Datarails MCP tools (aggregate_table_data, get_sample_records, etc.).
+            After the build passes, use these MCP tools to test that your API calls will work correctly.
+            For example, call aggregate_table_data with the same payload your app uses and verify the response
+            format matches what your code expects. If there are mismatches, fix the code and rebuild.
+        run: |
+          claude -p "$APP_PROMPT" \
+            --dangerously-skip-permissions \
+            --output-format stream-json \
+            --verbose \
+            --allowedTools "Bash(command:*)" "Edit" "Write" "Read" "Glob" "Grep" "mcp__datarails__*" \
+            --max-turns 30
+      - name: Final build verification
+        env:
+          VITE_MCP_URL: https://mcp-poc-tom.azurewebsites.net/mcp
+          VITE_DR_SESSION_ID: ${{ secrets.DR_SESSION_ID }}
+          VITE_DR_CSRF_TOKEN: ${{ secrets.DR_CSRF_TOKEN }}
+          VITE_DR_DOMAIN: ${{ secrets.DR_DOMAIN }}
+        run: |
+          npm install
+          npm run build
+      - name: Commit and push changes
+        run: |
+          git config user.name "Claude Code"
+          git config user.email "claude@datarails.com"
+          git pull --rebase origin main || true
+          git add -A
+          git diff --staged --quiet || git commit -m "Update app via Claude Code"
+          git push
+      - name: Deploy to Azure Static Web Apps
+        uses: Azure/static-web-apps-deploy@v1
+        with:
+          azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          action: upload
+          app_location: dist
+          skip_app_build: true
