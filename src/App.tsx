@@ -2986,6 +2986,325 @@ RULES:
   );
 }
 
+// ─── FX Rates Page ────────────────────────────────────────────────────────────
+
+const FX_BASE = 'https://v6.exchangerate-api.com/v6/779aa944e4457939ee104cfa';
+const POPULAR = ['EUR', 'GBP', 'JPY', 'CHF', 'CAD', 'AUD', 'CNY', 'INR'];
+
+type CurrencyPair = [string, string];
+
+function CurrencySelect({
+  value,
+  onChange,
+  currencies,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  currencies: CurrencyPair[];
+}) {
+  const [search, setSearch] = useState('');
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  const filtered = currencies.filter(
+    ([code, name]) =>
+      code.toLowerCase().includes(search.toLowerCase()) ||
+      name.toLowerCase().includes(search.toLowerCase()),
+  );
+
+  useEffect(() => {
+    function handler(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const selectedName = currencies.find(([c]) => c === value)?.[1] ?? '';
+
+  return (
+    <div className="fx-currency-select" ref={ref}>
+      <button className="fx-currency-btn" onClick={() => setOpen(o => !o)}>
+        <span>{value} – {selectedName}</span>
+        <span>{open ? '▲' : '▼'}</span>
+      </button>
+      {open && (
+        <div className="fx-currency-dropdown">
+          <input
+            className="fx-currency-search"
+            placeholder="Search currency…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            autoFocus
+          />
+          {filtered.map(([code, name]) => (
+            <div
+              key={code}
+              className={`fx-currency-option${code === value ? ' selected' : ''}`}
+              onClick={() => { onChange(code); setOpen(false); setSearch(''); }}
+            >
+              <span className="code">{code}</span>
+              <span className="name">{name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FxRatesPage() {
+  const [currencies, setCurrencies] = useState<CurrencyPair[]>([]);
+  const [fromCurrency, setFromCurrency] = useState('USD');
+  const [toCurrency, setToCurrency] = useState('EUR');
+  const [amount, setAmount] = useState(1000);
+  const [amountStr, setAmountStr] = useState('1000');
+  const [result, setResult] = useState<number | null>(null);
+  const [rate, setRate] = useState<number | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  const [popularRates, setPopularRates] = useState<Record<string, number>>({});
+  const [compareList, setCompareList] = useState<string[]>(['EUR', 'GBP', 'JPY']);
+  const [compareRates, setCompareRates] = useState<Record<string, number>>({});
+  const [addingCurrency, setAddingCurrency] = useState(false);
+  const [addSearch, setAddSearch] = useState('');
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Load currencies on mount
+  useEffect(() => {
+    fetch(`${FX_BASE}/codes`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.result === 'success') setCurrencies(d.supported_codes as CurrencyPair[]);
+      })
+      .catch(() => {});
+  }, []);
+
+  // Fetch conversion with debounce
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      if (!amount || !fromCurrency || !toCurrency) return;
+      setLoading(true);
+      fetch(`${FX_BASE}/pair/${fromCurrency}/${toCurrency}/${amount}`)
+        .then(r => r.json())
+        .then(d => {
+          if (d.result === 'success') {
+            setResult(d.conversion_result);
+            setRate(d.conversion_rate);
+            setLastUpdated(new Date());
+          }
+        })
+        .catch(() => {})
+        .finally(() => setLoading(false));
+    }, 500);
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [fromCurrency, toCurrency, amount]);
+
+  // Fetch popular rates when fromCurrency changes
+  useEffect(() => {
+    fetch(`${FX_BASE}/latest/${fromCurrency}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.result === 'success') {
+          const rates = d.conversion_rates as Record<string, number>;
+          const pop: Record<string, number> = {};
+          POPULAR.forEach(c => { if (rates[c]) pop[c] = rates[c]; });
+          setPopularRates(pop);
+          // Also update compare rates
+          const cr: Record<string, number> = {};
+          compareList.forEach(c => { if (rates[c]) cr[c] = rates[c]; });
+          setCompareRates(cr);
+        }
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromCurrency]);
+
+  // Update compare rates when compareList changes
+  useEffect(() => {
+    if (Object.keys(popularRates).length === 0) return;
+    fetch(`${FX_BASE}/latest/${fromCurrency}`)
+      .then(r => r.json())
+      .then(d => {
+        if (d.result === 'success') {
+          const rates = d.conversion_rates as Record<string, number>;
+          const cr: Record<string, number> = {};
+          compareList.forEach(c => { if (rates[c]) cr[c] = rates[c]; });
+          setCompareRates(cr);
+        }
+      })
+      .catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [compareList]);
+
+  function swap() {
+    setFromCurrency(toCurrency);
+    setToCurrency(fromCurrency);
+  }
+
+  function formatAmount(n: number) {
+    return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
+  }
+
+  function formatRate(n: number) {
+    return n < 1 ? n.toFixed(4) : n < 10 ? n.toFixed(4) : n.toFixed(2);
+  }
+
+  function timeAgo(d: Date) {
+    const s = Math.round((Date.now() - d.getTime()) / 1000);
+    if (s < 5) return 'just now';
+    if (s < 60) return `${s}s ago`;
+    return `${Math.floor(s / 60)}m ago`;
+  }
+
+  const maxPopular = Math.max(...Object.values(popularRates).filter(v => v <= 200), 1);
+
+  const filteredAdd = currencies.filter(
+    ([code, name]) =>
+      !compareList.includes(code) &&
+      (code.toLowerCase().includes(addSearch.toLowerCase()) ||
+        name.toLowerCase().includes(addSearch.toLowerCase())),
+  ).slice(0, 40);
+
+  return (
+    <div className="fx-page">
+      <h1>FX Currency Exchange</h1>
+      <p className="subtitle">Live exchange rates powered by ExchangeRate-API</p>
+
+      {/* ── Converter ── */}
+      <div className="fx-converter">
+        <div className="fx-section-title">Currency Converter</div>
+        <div className="fx-row">
+          <CurrencySelect value={fromCurrency} onChange={setFromCurrency} currencies={currencies} />
+          <input
+            className="fx-amount-input"
+            type="text"
+            inputMode="decimal"
+            value={amountStr}
+            onChange={e => {
+              const raw = e.target.value.replace(/,/g, '');
+              setAmountStr(e.target.value);
+              const n = parseFloat(raw);
+              if (!isNaN(n)) setAmount(n);
+            }}
+            onBlur={() => setAmountStr(amount.toLocaleString('en-US'))}
+          />
+        </div>
+
+        <div style={{ textAlign: 'center' }}>
+          <button className="fx-swap-btn" onClick={swap} title="Swap currencies">⇄</button>
+        </div>
+
+        <div className="fx-row">
+          <CurrencySelect value={toCurrency} onChange={setToCurrency} currencies={currencies} />
+          <div className="fx-result-inline">
+            {loading ? (
+              <span className="fx-converting">Converting…</span>
+            ) : result !== null ? (
+              <span className="fx-result-num">{formatAmount(result)} {toCurrency}</span>
+            ) : (
+              <span className="fx-result-placeholder">—</span>
+            )}
+          </div>
+        </div>
+
+        <div className="fx-result">
+          {rate !== null && (
+            <div className="fx-result-rate">1 {fromCurrency} = {formatRate(rate)} {toCurrency}</div>
+          )}
+          {lastUpdated && (
+            <div className="fx-result-updated">Last updated: {timeAgo(lastUpdated)}</div>
+          )}
+        </div>
+      </div>
+
+      {/* ── Popular Rates ── */}
+      <div className="fx-converter" style={{ marginTop: 20 }}>
+        <div className="fx-section-title">Popular Rates (base: {fromCurrency})</div>
+        <div className="fx-popular-grid">
+          {POPULAR.map(code => {
+            const val = popularRates[code];
+            const barPct = val !== undefined
+              ? Math.min(100, (Math.min(val, maxPopular) / maxPopular) * 100)
+              : 0;
+            return (
+              <div key={code} className="fx-rate-card">
+                <div className="code">{code}</div>
+                <div className="value">{val !== undefined ? formatRate(val) : '…'}</div>
+                {val !== undefined && (
+                  <div className="fx-mini-bar">
+                    <div className="fx-mini-bar-fill" style={{ width: `${barPct}%` }} />
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ── Multi-Currency Compare ── */}
+      <div className="fx-compare">
+        <div className="fx-section-title">Multi-Currency Compare</div>
+        <div style={{ fontSize: 13, color: '#94a3b8', marginBottom: 12 }}>
+          Base: {formatAmount(amount)} {fromCurrency}
+        </div>
+        <div className="fx-compare-chips">
+          {compareList.map(code => {
+            const r = compareRates[code];
+            return (
+              <div key={code} className="fx-compare-chip">
+                <span className="code">{code}</span>
+                <span className="amount">
+                  {r !== undefined ? formatAmount(amount * r) : '…'}
+                </span>
+                <button
+                  className="remove"
+                  onClick={() => setCompareList(cl => cl.filter(c => c !== code))}
+                  title="Remove"
+                >×</button>
+              </div>
+            );
+          })}
+
+          {addingCurrency ? (
+            <div className="fx-add-dropdown-wrapper">
+              <input
+                className="fx-add-search"
+                placeholder="Search…"
+                autoFocus
+                value={addSearch}
+                onChange={e => setAddSearch(e.target.value)}
+                onBlur={() => setTimeout(() => { setAddingCurrency(false); setAddSearch(''); }, 150)}
+              />
+              <div className="fx-add-list">
+                {filteredAdd.map(([code, name]) => (
+                  <div
+                    key={code}
+                    className="fx-currency-option"
+                    onMouseDown={() => {
+                      setCompareList(cl => [...cl, code]);
+                      setAddingCurrency(false);
+                      setAddSearch('');
+                    }}
+                  >
+                    <span className="code">{code}</span>
+                    <span className="name">{name}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <button className="fx-add-btn" onClick={() => setAddingCurrency(true)}>
+              + Add currency
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── App with Router ──────────────────────────────────────────────────────────
 
 export default function App() {
@@ -3007,11 +3326,18 @@ export default function App() {
           >
             Variance Analysis
           </NavLink>
+          <NavLink
+            to="/fx"
+            className={({ isActive }) => isActive ? 'nav-link active' : 'nav-link'}
+          >
+            FX Rates
+          </NavLink>
         </div>
       </nav>
       <Routes>
         <Route path="/" element={<DashboardPage />} />
         <Route path="/variance" element={<VarianceAnalysisPage />} />
+        <Route path="/fx" element={<FxRatesPage />} />
       </Routes>
       <SelfImproveDrawer />
     </BrowserRouter>
